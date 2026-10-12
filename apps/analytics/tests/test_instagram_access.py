@@ -1,6 +1,7 @@
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
 from django.db import connection
 from django.test import TestCase, override_settings
@@ -9,9 +10,10 @@ from django.utils import timezone
 
 from apps.analytics import tasks
 from apps.analytics.instagram_access import record_failure, record_status, record_success
+from apps.analytics.models import AccountInsightsSnapshot, PostInsightsSnapshot
 from apps.composer.models import PlatformPost, Post
-from apps.members.models import WorkspaceMembership
-from apps.social_accounts.models import SocialAccount
+from apps.members.models import OrgMembership, WorkspaceMembership
+from apps.social_accounts.models import AnalyticsPlatformConfig, SocialAccount
 from apps.social_accounts.views import _create_or_update_account
 from apps.social_accounts.webhooks import record_missing_scopes
 from apps.workspaces.models import Workspace
@@ -80,6 +82,104 @@ def test_account_and_post_analytics_use_user_credential(account):
     account.refresh_from_db()
     assert account.analytics_status == "ready"
     assert account.oauth_access_token == "PAGE-TOKEN"
+
+
+def insights_outage_request(method, url, **kwargs):
+    if url.endswith("/insights"):
+        raise APIError("Insights unavailable", status_code=503)
+    return MagicMock(json=MagicMock(return_value={"followers_count": 50, "like_count": 12}))
+
+
+def test_all_failed_account_insights_preserve_snapshots_and_do_not_mark_ready(account):
+    today = timezone.now().date()
+    snapshot = AccountInsightsSnapshot.objects.create(social_account=account, metric_key="reach", date=today, value=82)
+    provider = provider_for(account)
+    provider._request = MagicMock(side_effect=insights_outage_request)
+    with patch("apps.analytics.tasks._resolve_provider", return_value=provider):
+        tasks._sync_account_metrics(account, today, force_today=True)
+    account.refresh_from_db()
+    snapshot.refresh_from_db()
+    assert snapshot.value == 82
+    assert AccountInsightsSnapshot.objects.filter(social_account=account).count() == 1
+    assert account.analytics_status == "temporary_error"
+    assert not account.analytics_needs_reconnect
+    assert account.connection_status == "connected"
+
+
+@pytest.mark.parametrize("single_post", [True, False])
+def test_all_failed_post_insights_keep_existing_metrics_and_record_failure(account, single_post):
+    now = timezone.now()
+    post = Post.objects.create(workspace=account.workspace, caption="Hello")
+    pp = PlatformPost.objects.create(
+        post=post, social_account=account, status="published", platform_post_id="media-1", published_at=now
+    )
+    snapshot = PostInsightsSnapshot.objects.create(platform_post=pp, metric_key="likes", date=now.date(), value=25)
+    provider = provider_for(account)
+    provider._request = MagicMock(side_effect=insights_outage_request)
+    with patch("apps.analytics.tasks._resolve_provider", return_value=provider):
+        if single_post:
+            tasks._sync_post_metrics(pp, now.date())
+        else:
+            assert tasks._sync_account_posts(account, provider, "USER-TOKEN", [pp], now.date()) == (0, 1, 1)
+    account.refresh_from_db()
+    pp.refresh_from_db()
+    snapshot.refresh_from_db()
+    assert snapshot.value == 25
+    assert PostInsightsSnapshot.objects.filter(platform_post=pp).count() == 1
+    assert account.analytics_status == "temporary_error"
+    assert pp.analytics_failure_count == 1
+
+
+@pytest.mark.parametrize(
+    "consent,reason,status",
+    [
+        (False, "missing_scope", "reconnect_required"),
+        (True, "app_or_asset_access", "attention_required"),
+    ],
+)
+def test_post_timeout_preserves_confirmed_account_access_failure(account, consent, reason, status):
+    now = timezone.now()
+    post = Post.objects.create(workspace=account.workspace, caption="Hello")
+    PlatformPost.objects.create(
+        post=post, social_account=account, status="published", platform_post_id="media-1", published_at=now
+    )
+    provider = provider_for(account, consent=consent)
+    provider.get_account_metrics = MagicMock(side_effect=permission_error())
+    provider.get_post_metrics = MagicMock(side_effect=httpx.ReadTimeout("Post timed out"))
+    with patch("apps.analytics.tasks._resolve_provider", return_value=provider):
+        tasks._sync_one_account(account, now.date(), now, cache={}, force_today=True)
+    provider.get_post_metrics.assert_called_once_with("USER-TOKEN", "media-1")
+    account.refresh_from_db()
+    assert account.analytics_status == status
+    assert account.analytics_error_reason == reason
+    assert account.analytics_needs_reconnect == (not consent)
+
+
+@pytest.mark.parametrize(
+    "later_error",
+    [
+        APIError("Temporary outage", status_code=503),
+        QuotaExceededError("Rate limit", platform="instagram", retry_after=300),
+    ],
+)
+def test_transient_error_keeps_expired_credential_verdict(account, later_error):
+    provider = provider_for(account)
+    record_failure(account, permission_error(code=190), provider)
+    record_failure(account, later_error, provider)
+    account.refresh_from_db()
+    assert account.analytics_error_reason == "expired_user_token"
+    assert account.analytics_needs_reconnect
+
+
+def test_a_new_successful_pass_can_clear_an_access_failure(account):
+    provider = provider_for(account, consent=False)
+    record_failure(account, permission_error(), provider)
+    provider.get_account_metrics = MagicMock(return_value=AccountMetrics(reach=12, followers=20))
+    with patch("apps.analytics.tasks._resolve_provider", return_value=provider):
+        tasks._sync_account_metrics(account, timezone.now().date(), force_today=True)
+    account.refresh_from_db()
+    assert account.analytics_status == "ready"
+    assert not account.analytics_needs_reconnect
 
 
 def test_expired_analytics_token_does_not_break_connection(account):
@@ -273,6 +373,28 @@ def test_status_endpoint_is_scoped_and_stops_polling_when_ready(client, user, ac
     )
     client.logout()
     assert client.get(url).status_code == 302
+
+
+def test_disabled_analytics_hides_checking_on_cards_and_stops_existing_poll(client, user, account):
+    OrgMembership.objects.create(user=user, organization=account.workspace.organization, org_role="owner")
+    WorkspaceMembership.objects.create(user=user, workspace=account.workspace, workspace_role="manager")
+    client.force_login(user)
+    list_url = reverse("social_accounts:list", kwargs={"workspace_id": account.workspace_id})
+    status_url = reverse("analytics:status", kwargs={"workspace_id": account.workspace_id, "account_id": account.pk})
+    assert b"every 3s" in client.get(list_url).content
+    assert b"every 3s" in client.get(status_url).content
+    config, _ = AnalyticsPlatformConfig.objects.update_or_create(platform="instagram", defaults={"is_enabled": False})
+    for url in (list_url, status_url):
+        response = client.get(url)
+        assert response.status_code == 200
+        assert b"every 3s" not in response.content
+        assert b"Checking Instagram analytics access" not in response.content
+        assert f'id="instagram-analytics-{account.pk}"'.encode() in response.content
+    account.refresh_from_db()
+    assert account.analytics_status == "checking"
+    config.is_enabled = True
+    config.save(update_fields=["is_enabled"])
+    assert b"every 3s" in client.get(list_url).content
 
 
 def test_user_permission_api_reads_person_statuses():

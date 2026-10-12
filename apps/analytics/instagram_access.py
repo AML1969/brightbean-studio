@@ -34,6 +34,13 @@ def record_status(account, status, reason=""):
     """An old credential's results must never overwrite a reconnect's status."""
     if account.platform != "instagram":
         return
+    # A timeout or quota block does not disprove a confirmed access failure.
+    # Keep the recovery action until a successful recheck or reconnect.
+    if status == SocialAccount.AnalyticsStatus.TEMPORARY and account.analytics_status in (
+        SocialAccount.AnalyticsStatus.RECONNECT,
+        SocialAccount.AnalyticsStatus.ATTENTION,
+    ):
+        return
     verdict = (status, reason)
     if getattr(account, "_instagram_analytics_status_recorded", None) == verdict:
         return

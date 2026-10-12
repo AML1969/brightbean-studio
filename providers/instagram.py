@@ -495,6 +495,7 @@ class InstagramProvider(SocialProvider):
             access_token=access_token,
             metrics=INSTAGRAM_MEDIA_INSIGHTS,
             endpoint_type="media",
+            require_success=True,
         )
         likes = values.get("likes", fields.get("like_count", 0))
         comments = values.get("comments", fields.get("comments_count", 0))
@@ -535,6 +536,7 @@ class InstagramProvider(SocialProvider):
                 "total_interactions": {"metric_type": "total_value"},
             },
             endpoint_type="account",
+            require_success=True,
         )
         profile = self._get_profile_fields(access_token, ig_user_id)
         # ``None`` means the fetch FAILED (vs a real 0): leave followers unset so

@@ -727,6 +727,24 @@ class InboxReplyResponse(Schema):
         )
 
 
+class InboxAttachmentResponse(Schema):
+    type: str
+    url: str = ""
+
+
+class InboxReplyEligibilityResponse(Schema):
+    can_send: bool
+    reason: str = ""
+    window: str
+    standard_reply_until: dt.datetime | None = None
+    human_reply_until: dt.datetime | None = None
+    human_agent: bool = False
+
+    @field_serializer("standard_reply_until", "human_reply_until")
+    def _serialize_deadline(self, value):
+        return _serialize_utc_z(value)
+
+
 class InboxMessageResponse(Schema):
     """An inbound comment / mention / DM / review in the unified inbox."""
 
@@ -744,6 +762,10 @@ class InboxMessageResponse(Schema):
     received_at: dt.datetime
     created_at: dt.datetime
     replies: list[InboxReplyResponse] = Field(default_factory=list)
+    attachments: list[InboxAttachmentResponse] = Field(default_factory=list)
+    reply_eligibility: InboxReplyEligibilityResponse = Field(
+        description="Platform and reply-window eligibility for REST/MCP. Sending also requires reply_from_inbox permission."
+    )
 
     @field_serializer("received_at", "created_at")
     def _serialize_dt(self, value: dt.datetime | None) -> str | None:
@@ -751,6 +773,8 @@ class InboxMessageResponse(Schema):
 
     @classmethod
     def from_message(cls, message, *, include_replies: bool = False) -> InboxMessageResponse:
+        from apps.inbox.reply_policy import reply_eligibility
+
         replies: list[InboxReplyResponse] = []
         if include_replies:
             if "replies" in getattr(message, "_prefetched_objects_cache", {}):
@@ -773,6 +797,8 @@ class InboxMessageResponse(Schema):
             received_at=message.received_at,
             created_at=message.created_at,
             replies=replies,
+            attachments=message.attachments,
+            reply_eligibility=reply_eligibility(message),
         )
 
 

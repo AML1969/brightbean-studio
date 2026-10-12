@@ -56,6 +56,9 @@
                     {% elif page.already_connected %}
                     <p class="text-xs text-emerald-600 mt-0.5">Already connected &middot; select to refresh</p>
                     {% endif %}
+                    {% if page.can_message is False %}
+                    <p class="text-xs text-amber-600 mt-0.5">DMs unavailable: grant messaging access on the linked Facebook Page, then reconnect.</p>
+                    {% endif %}
                 </div>
 
                 {% if page.followers_count %}

@@ -766,7 +766,7 @@ class TestRetryWebhooksView:
 
         assert response.status_code == 200
         body = response.content.decode()
-        assert "Real-time comments are off" in body
+        assert "Some real-time inbox updates are unavailable" in body
         # Still retryable, so the card keeps offering the retry rather than
         # sending the user to OAuth for a transient failure.
         assert "Try again" in body

@@ -11,6 +11,7 @@ from apps.inbox.models import InboxMessage
 from apps.inbox.tasks import InboxSyncEngine
 from apps.social_accounts.models import SocialAccount
 from providers.exceptions import APIError, QuotaExceededError, TokenExpiredError
+from providers.instagram import InstagramProvider
 from providers.types import OAuthTokens
 from providers.youtube import YouTubeMessageBatch
 
@@ -75,6 +76,84 @@ def test_first_message_on_quiet_account_still_notifies(connected_account):
         with patch.object(InboxSyncEngine, "_notify_new_message") as notify_new:
             InboxSyncEngine().sync_all()
         notify_new.assert_called_once()
+
+
+@pytest.mark.parametrize("comments_fail", [False, True])
+def test_instagram_poll_continuation_survives_a_fresh_worker(connected_account, comments_fail):
+    connected_account.webhook_target_id = "page-1"
+    connected_account.oauth_access_token = "page-token"
+    connected_account.save()
+    calls = []
+
+    def request(method, url, **kwargs):
+        after = kwargs["params"].get("after")
+        calls.append((url, after))
+        if url.endswith("/conversations"):
+            data = {"data": [{"id": "busy"}, {"id": "later"}]}
+        elif url.endswith("/busy/messages"):
+            page = int(after or "0")
+            data = {"data": []}
+            if page < 99:
+                data["paging"] = {"next": "https://untrusted/token", "cursors": {"after": str(page + 1)}}
+        else:
+            data = {
+                "data": [
+                    {
+                        "id": "later-dm",
+                        "from": {"id": "customer"},
+                        "created_time": timezone.now().isoformat(),
+                        "message": "Question",
+                    }
+                ]
+            }
+        return SimpleNamespace(json=lambda: data)
+
+    def factory(platform, credentials):
+        instance = InstagramProvider(credentials)
+        instance._fetch_media_comments = MagicMock(return_value=[])
+        if comments_fail:
+            instance._fetch_media_comments.side_effect = APIError("comment grant rejected", status_code=403)
+        instance._request = MagicMock(side_effect=request)
+        return instance
+
+    with patch("apps.inbox.tasks.get_provider", side_effect=factory):
+        InboxSyncEngine().sync_all()
+        connected_account.refresh_from_db()
+        assert connected_account.instagram_dm_poll_state["message_after"] == "99"
+        assert not InboxMessage.objects.filter(social_account=connected_account).exists()
+        with patch.object(InboxSyncEngine, "_notify_new_message"):
+            InboxSyncEngine().sync_all()
+
+    connected_account.refresh_from_db()
+    assert connected_account.instagram_dm_poll_state == {}
+    assert calls[100][0].endswith("/busy/messages")
+    assert calls[100][1] == "99"
+    assert InboxMessage.objects.filter(social_account=connected_account, platform_message_id="later-dm").exists()
+
+
+@pytest.mark.parametrize("failure_mode", ["dm_failed", "import_failed"])
+def test_instagram_failed_poll_keeps_previous_continuation(connected_account, failure_mode):
+    from providers.meta_messaging import InstagramMessageBatch
+
+    previous = {"conversations": ["retry-this-page"]}
+    connected_account.instagram_dm_poll_state = previous
+    connected_account.save()
+    batch = InstagramMessageBatch([_msg("comment-or-dm")], poll_state=None if failure_mode == "dm_failed" else {})
+    instance = MagicMock()
+    instance.get_messages.return_value = batch
+    engine = InboxSyncEngine()
+    with patch("apps.inbox.tasks.get_provider", return_value=instance):
+        if failure_mode == "import_failed":
+            with (
+                patch.object(engine, "_upsert_message", side_effect=RuntimeError("storage failed")),
+                pytest.raises(RuntimeError, match="storage failed"),
+            ):
+                engine._sync_account(connected_account)
+        else:
+            with patch.object(engine, "_notify_new_message"):
+                engine._sync_account(connected_account)
+    connected_account.refresh_from_db()
+    assert connected_account.instagram_dm_poll_state == previous
 
 
 @pytest.mark.django_db

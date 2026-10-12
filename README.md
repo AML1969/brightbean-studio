@@ -400,7 +400,7 @@ Facebook and Instagram share the same Meta app credentials. Threads runs on the 
    - Add the optional permission: `pages_messaging`
 
    **Use case: "Manage messaging & content on Instagram"** (Instagram)
-   - Add these permissions: `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`
+   - Add these permissions: `instagram_basic`, `instagram_content_publish`, `instagram_manage_comments`, `instagram_manage_insights`, `instagram_manage_messages`, `pages_manage_metadata`
 
    **Use case: "Access the Threads API"** (Threads)
    - This use case auto-includes `threads_basic`
@@ -421,7 +421,7 @@ Facebook and Instagram share the same Meta app credentials. Threads runs on the 
 
    **If you connect Instagram through this Facebook app, also subscribe to the `Instagram` object** on the same Webhooks page:
    - **Callback URL:** `{APP_URL}/webhooks/facebook/` (the same endpoint — it handles both platforms)
-   - Subscribe to the `comments` and `mentions` fields.
+   - Subscribe to the `comments`, `mentions`, and `messages` fields.
 
    > `comments` and `mentions` belong to the **Instagram** object, not the Page — a Page accepts only its own fields (`feed`, `mention`, `messages`, …). Studio subscribes the Instagram *account* automatically on connect, but the object-level configuration here can only be done in the dashboard. Without it, Instagram comments arrive only via the 5-minute poll and mentions not at all.
 6. Set the environment variables:
@@ -437,6 +437,8 @@ Facebook and Instagram share the same Meta app credentials. Threads runs on the 
    sending an ad-hoc `scope` list. Configure the required permissions and asset
    selection in Meta's configuration, and include every business whose Pages
    should be available to the login.
+   Include `instagram_manage_messages` and `pages_manage_metadata` in that
+   configuration too; changing the code's scope list does not change Meta's configuration.
 7. **Threads:** the "Access the Threads API" use case gets its own App ID, App Secret, and redirect URIs. Go to **Use cases → Access the Threads API → Settings** and add the Threads redirect URI:
    ```
    {APP_URL}/social-accounts/callback/threads/
@@ -447,6 +449,57 @@ Facebook and Instagram share the same Meta app credentials. Threads runs on the 
    PLATFORM_THREADS_APP_SECRET=your-threads-app-secret
    ```
    These have no fallback: until both are set, Threads shows as **Not Configured** on the connect page. Sending the Facebook App ID to Threads fails with error `4476002`.
+
+### Instagram DMs and reply windows
+
+Both Instagram connectors receive DMs and supported incoming media in the unified
+inbox and send text replies. The Facebook Login connector uses the selected
+Page's token and ID for conversations and sending, while incoming webhook entries
+identify the Instagram account. Studio adds `messages` to that Page's existing
+subscription without replacing Facebook feed/mention fields.
+
+For Facebook Login Instagram messaging, the login needs `instagram_manage_messages`
+and `pages_manage_metadata`, a linked professional account, and the Page's
+`MESSAGING` task. In Instagram, enable **Settings → Messages and story replies →
+Message controls → Connected tools → Allow access to messages**. Reconnect existing
+accounts after adding permissions, including permissions in any Login for Business
+configuration. Missing DM permissions do not disable publishing or comment polling.
+
+For external customers, complete Meta App Review, the required Advanced Access,
+and business verification. Prepare a review recording showing login and account
+selection, a customer DM appearing in Studio, an incoming attachment, a text reply,
+and receipt of that reply in Instagram. Configure the Instagram object's `messages`
+field and callback in the Meta dashboard; the Page subscription alone does not
+configure the app-level callback.
+
+REST/MCP sends use the 24-hour window measured from the customer's latest verified
+message to that account. They may save drafts after that window closes. A person
+can review and send from the web inbox for up to seven days only after Meta approves
+**Human Agent** access and an administrator enables the matching app setting:
+
+- `PLATFORM_FACEBOOK_HUMAN_AGENT_ENABLED=true` for Facebook Messenger and Instagram via Facebook Login.
+- `PLATFORM_INSTAGRAM_HUMAN_AGENT_ENABLED=true` for Instagram Direct.
+- For organization credentials, set `human_agent_enabled` to `true` on the applicable platform's credential JSON.
+
+These settings default to false. Do not enable them before approval. No endpoint
+or MCP argument can declare a programmatic reply human-operated. After seven days,
+or when the message timestamp cannot be verified, wait for a new customer message.
+
+After deployment, apply migrations and check each affected connection:
+
+```sh
+python manage.py migrate
+python manage.py diagnose_instagram_messages --account-id <uuid> --refresh-scopes
+python manage.py subscribe_webhooks --platform instagram --retry-failed
+```
+
+The diagnostic command does not send DMs; `--refresh-scopes` saves the verified
+permission result. Reconnect any account with missing grants before retrying its
+subscription. Live verification should cover text and media reception, a text
+reply within 24 hours, duplicate/echo suppression, and an approved human support
+reply after 24 hours. Incoming media URLs may expire; open Instagram if an
+attachment cannot load. Outgoing media and new automated reply workflows are not
+included.
 
 ### Instagram (Direct, via Instagram Login)
 

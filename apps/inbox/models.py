@@ -122,6 +122,13 @@ class InboxMessage(models.Model):
     def platform(self):
         return self.social_account.platform
 
+    @property
+    def attachments(self):
+        from providers.meta_messaging import normalize_attachments
+
+        extra = self.extra or {}
+        return normalize_attachments(extra.get("attachments", (extra.get("message") or {}).get("attachments", [])))
+
 
 class InboxReply(models.Model):
     class Status(models.TextChoices):

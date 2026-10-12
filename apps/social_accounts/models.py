@@ -59,10 +59,11 @@ class SocialAccount(models.Model):
     instance_url = models.URLField(max_length=500, blank=True, default="")
 
     # Object we subscribed for webhook delivery, when it isn't this account
-    # itself. Instagram accounts connected via Facebook Login receive their
-    # comment and message events through the linked Page, so this holds that
-    # Page ID — needed to unsubscribe cleanly on disconnect.
+    # itself. For Facebook Login Instagram this holds the linked Page ID used
+    # for DM polling, sending and message subscriptions. Comment subscriptions
+    # still address the Instagram account itself.
     webhook_target_id = models.CharField(max_length=255, blank=True, default="")
+    messaging_access = models.BooleanField(null=True, blank=True, default=None)
 
     # Whether the platform is currently pushing this account's activity to us.
     # Null means "not applicable" (the platform has no webhooks) or "not tried
@@ -134,6 +135,9 @@ class SocialAccount(models.Model):
     inbox_initial_backfill_started_at = models.DateTimeField(blank=True, null=True)
     inbox_deep_sweep_cursor = models.TextField(blank=True, default="")
     inbox_deep_sweep_started_at = models.DateTimeField(blank=True, null=True)
+    # Resume bounded Facebook Login Instagram DM walks across worker restarts.
+    # Contains only object IDs/cursors, never OAuth tokens or message bodies.
+    instagram_dm_poll_state = models.JSONField(default=dict, blank=True)
 
     objects = WorkspaceScopedManager()
 

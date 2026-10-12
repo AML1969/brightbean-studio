@@ -7,6 +7,7 @@ from typing import Any
 
 from background_task import background
 from django.conf import settings
+from django.db import transaction
 from django.utils import timezone
 
 from apps.common import quota
@@ -208,6 +209,7 @@ class InboxSyncEngine:
         imported: bool = False,
         started_at=None,
         next_page_token: str | None = None,
+        instagram_dm_poll_state: dict | None = None,
     ) -> None:
         """Record that this account has been polled, so the floor can hold it off.
 
@@ -223,6 +225,9 @@ class InboxSyncEngine:
         now = timezone.now()
         fields = ["inbox_last_polled_at"]
         account.inbox_last_polled_at = now
+        if imported and account.platform == "instagram" and instagram_dm_poll_state is not None:
+            account.instagram_dm_poll_state = instagram_dm_poll_state
+            fields.append("instagram_dm_poll_state")
         if imported and account.platform == "youtube":
             if deep:
                 sweep_start = account.inbox_deep_sweep_started_at or started_at
@@ -255,7 +260,10 @@ class InboxSyncEngine:
             return
 
         try:
-            provider = get_provider(account.platform, _resolve_publish_credentials(account))
+            credentials = _resolve_publish_credentials(account)
+            if account.platform == "instagram":
+                credentials["instagram_dm_poll_state"] = account.instagram_dm_poll_state
+            provider = get_provider(account.platform, credentials)
         except ValueError:
             logger.warning("No provider for platform %s", account.platform)
             return
@@ -394,6 +402,7 @@ class InboxSyncEngine:
             imported=True,
             started_at=poll_started_at,
             next_page_token=next_page_token,
+            instagram_dm_poll_state=getattr(messages, "poll_state", None),
         )
 
     def _record_spend(self, provider, account, spend) -> None:
@@ -496,6 +505,7 @@ class InboxSyncEngine:
         logger.info("YouTube inbox poll recovered for account %s", account.id)
         return messages
 
+    @transaction.atomic
     def _upsert_message(self, account, msg, notify=True, related_post_id=None):
         """Create or update an inbox message, deduplicating by platform_message_id."""
         defaults = {
@@ -511,11 +521,19 @@ class InboxSyncEngine:
         if related_post_id:
             defaults["related_post_id"] = related_post_id
 
-        obj, created = InboxMessage.objects.update_or_create(
+        obj, created = InboxMessage.objects.select_for_update().get_or_create(
             social_account=account,
             platform_message_id=msg.platform_message_id,
             defaults=defaults,
         )
+        if not created:
+            defaults["extra"] = {**(obj.extra or {}), **defaults["extra"]}
+            if (obj.extra or {}).get("is_deleted"):
+                defaults["body"] = ""
+                defaults["extra"].update(is_deleted=True, attachments=[])
+            for key, value in defaults.items():
+                setattr(obj, key, value)
+            obj.save(update_fields=list(defaults))
         if created:
             obj.sentiment = analyze_sentiment(obj.body)
             obj.save(update_fields=["sentiment"])

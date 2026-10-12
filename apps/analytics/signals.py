@@ -32,9 +32,13 @@ def enqueue_analytics_backfill(sender, instance: SocialAccount, created: bool, u
     if getattr(instance, "_skip_analytics_backfill", False):
         return
     if not created:
-        if update_fields is None:
+        if update_fields is None and not getattr(instance, "_analytics_credentials_changed", False):
             return
-        if "oauth_access_token" not in update_fields:
+        if update_fields is not None and not {
+            "oauth_access_token",
+            "oauth_facebook_user_access_token",
+            "facebook_user_token_expires_at",
+        }.intersection(update_fields):
             return
     if instance.connection_status != SocialAccount.ConnectionStatus.CONNECTED:
         return
@@ -42,7 +46,10 @@ def enqueue_analytics_backfill(sender, instance: SocialAccount, created: bool, u
     # background_task before the apps registry is fully loaded.
     from .tasks import backfill_account_analytics
 
-    backfill_account_analytics(str(instance.id))
+    if instance.platform == "instagram":
+        transaction.on_commit(lambda: backfill_account_analytics(str(instance.id), remove_existing_tasks=True))
+    else:
+        backfill_account_analytics(str(instance.id))
 
 
 @receiver(pre_save, sender=AnalyticsPlatformConfig)

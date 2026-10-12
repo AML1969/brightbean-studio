@@ -9,6 +9,8 @@ import pytest
 from django.core import signing
 from django.test import override_settings
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 
 from apps.social_accounts.models import SocialAccount
 from apps.social_accounts.views import (
@@ -357,6 +359,7 @@ class TestOAuthCallbackView:
         assert account.token_expires_at is not None
 
     def test_instagram_redirects_to_account_selection(self, authenticated_client, workspace, user):
+        started = timezone.now()
         nonce = "nonce-123"
         state = _sign_state(workspace.id, "instagram", user.id, nonce)
         session = authenticated_client.session
@@ -388,8 +391,46 @@ class TestOAuthCallbackView:
         assert page_data["user_tokens"]["access_token"] == "long-lived-user-token"
         # A Page token from a long-lived user token does not expire.
         assert page_data["user_tokens"]["expires_in"] is None
+        expiry = parse_datetime(page_data["user_tokens"]["user_expires_at"])
+        assert started + timedelta(seconds=5184000) <= expiry <= timezone.now() + timedelta(seconds=5184000)
         mock_provider.refresh_token.assert_called_once_with("user-token")
         mock_provider.get_user_pages.assert_called_once_with("long-lived-user-token")
+
+    def test_instagram_batch_selection_preserves_user_expiry_and_existing_ids(self, authenticated_client, workspace):
+        expiry = timezone.now() + timedelta(days=60)
+        accounts = [
+            SocialAccount.objects.create(
+                workspace=workspace,
+                platform="instagram",
+                account_platform_id=f"ig-{i}",
+                oauth_access_token=f"page-{i}",
+                account_name=f"Channel {i}",
+            )
+            for i in range(5)
+        ]
+        session = authenticated_client.session
+        session["oauth_page_select"] = {
+            "workspace_id": str(workspace.id),
+            "platform": "instagram",
+            "user_tokens": {"access_token": "user", "expires_in": None, "user_expires_at": expiry.isoformat()},
+            "pages": [{"id": f"ig-{i}", "name": f"Channel {i}", "access_token": f"page-{i}"} for i in range(5)],
+        }
+        session.save()
+        response = authenticated_client.post(
+            reverse("social_accounts:select_account"),
+            {
+                "selected_pages": [f"ig-{i}" for i in range(5)],
+            },
+        )
+        assert response.status_code == 302
+        assert SocialAccount.objects.filter(workspace=workspace).count() == 5
+        for i, account in enumerate(accounts):
+            account.refresh_from_db()
+            assert account.oauth_access_token == f"page-{i}"
+            assert account.oauth_facebook_user_access_token == "user"
+            assert account.facebook_user_token_expires_at == expiry
+            assert account.token_expires_at is None
+            assert account.analytics_status == "checking"
 
     def test_tiktok_callback_replays_pkce_verifier(self, authenticated_client, workspace, user):
         """The verifier stashed at connect is read from the session and replayed

@@ -1,7 +1,7 @@
 import uuid
 from typing import Any
 
-from django.db import models
+from django.db import models, transaction
 
 from apps.common.encryption import EncryptedTextField
 from apps.common.managers import WorkspaceScopedManager
@@ -9,6 +9,14 @@ from apps.credentials.models import PlatformCredential
 
 
 class SocialAccount(models.Model):
+    class AnalyticsStatus(models.TextChoices):
+        UNKNOWN = "unknown", "Not checked"
+        CHECKING = "checking", "Checking"
+        READY = "ready", "Ready"
+        RECONNECT = "reconnect_required", "Reconnect required"
+        ATTENTION = "attention_required", "Operator attention required"
+        TEMPORARY = "temporary_error", "Temporary failure"
+
     class ConnectionStatus(models.TextChoices):
         CONNECTED = "connected", "Connected"
         TOKEN_EXPIRING = "token_expiring", "Token Expiring"
@@ -38,6 +46,14 @@ class SocialAccount(models.Model):
     oauth_access_token = EncryptedTextField(blank=True, default="")
     oauth_refresh_token = EncryptedTextField(blank=True, default="")
     token_expires_at = models.DateTimeField(blank=True, null=True)
+    # Facebook-login Instagram insights need the user's credential. The
+    # primary token remains the Page credential used by publishing and inbox.
+    oauth_facebook_user_access_token = EncryptedTextField(blank=True, default="")
+    facebook_user_token_expires_at = models.DateTimeField(blank=True, null=True)
+    analytics_status = models.CharField(max_length=25, choices=AnalyticsStatus.choices, default=AnalyticsStatus.UNKNOWN)
+    analytics_error_reason = models.CharField(max_length=40, blank=True, default="")
+    analytics_checked_at = models.DateTimeField(blank=True, null=True)
+    analytics_credentials_version = models.PositiveIntegerField(default=0)
 
     # Instance URL for Mastodon and Bluesky PDS
     instance_url = models.URLField(max_length=500, blank=True, default="")
@@ -127,6 +143,65 @@ class SocialAccount(models.Model):
 
     def __str__(self):
         return f"{self.account_name} ({self.get_platform_display()})"
+
+    def save(self, *args, **kwargs):
+        """Invalidate Instagram checks atomically when either credential changes."""
+        credential_fields = {"oauth_access_token", "oauth_facebook_user_access_token", "facebook_user_token_expires_at"}
+        fields = kwargs.get("update_fields")
+        self._analytics_credentials_changed = False
+        if self.platform != "instagram" or (fields is not None and not credential_fields.intersection(fields)):
+            return super().save(*args, **kwargs)
+        using = kwargs.get("using") or self._state.db or "default"
+        with transaction.atomic(using=using):
+            previous = type(self).objects.using(using).select_for_update().filter(pk=self.pk).first()
+            changed = previous is not None and any(
+                getattr(previous, field) != getattr(self, field)
+                for field in credential_fields
+                if fields is None or field in fields
+            )
+            # OAuth may return the same token after a consent change. A fresh
+            # connection still gets a new verification generation.
+            rechecking = (
+                fields is not None
+                and {"analytics_status", "oauth_facebook_user_access_token"}.issubset(fields)
+                and self.analytics_status == self.AnalyticsStatus.CHECKING
+            )
+            if changed or rechecking or (previous is None and self.oauth_access_token):
+                self._analytics_credentials_changed = True
+                self.__dict__.pop("_instagram_analytics_grant", None)
+                self.__dict__.pop("_instagram_analytics_status_recorded", None)
+                self.analytics_credentials_version = (previous.analytics_credentials_version if previous else 0) + 1
+                self.analytics_status = self.AnalyticsStatus.CHECKING
+                self.analytics_error_reason = ""
+                self.analytics_checked_at = None
+                self.analytics_needs_reconnect = False
+                if fields is not None:
+                    kwargs["update_fields"] = set(fields) | {
+                        "analytics_credentials_version",
+                        "analytics_status",
+                        "analytics_error_reason",
+                        "analytics_checked_at",
+                        "analytics_needs_reconnect",
+                    }
+            return super().save(*args, **kwargs)
+
+    @property
+    def connection_missing_scopes(self):
+        # Instagram analytics has its own grant-aware status. A Page token's
+        # scope list cannot establish whether the person declined insights.
+        return [
+            scope
+            for scope in self.missing_scopes
+            if self.platform != "instagram" or scope != "instagram_manage_insights"
+        ]
+
+    @property
+    def instagram_analytics_message(self):
+        if self.platform != "instagram":
+            return ""
+        from apps.analytics.instagram_access import status_message
+
+        return status_message(self)
 
     @property
     def display_label(self) -> str:

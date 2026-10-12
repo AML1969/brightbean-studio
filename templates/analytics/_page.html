@@ -3,7 +3,9 @@
 
 {% include "analytics/_page_header.html" %}
 
-{% if analytics_needs_reconnect %}
+{% if active_account.platform == "instagram" and not analytics_unavailable %}
+    {% include "analytics/_instagram_status.html" with account=active_account workspace_id=workspace.id %}
+{% elif analytics_needs_reconnect %}
 <div class="a-card" style="padding: 18px 22px; margin-bottom: 16px; background: var(--warning-50); border-color: var(--warning-500); display: flex; align-items: center; justify-content: space-between; gap: 16px;">
     <div>
         <div style="font-weight: 700; color: var(--warning-700);">Reconnect for analytics</div>

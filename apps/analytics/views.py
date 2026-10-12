@@ -15,6 +15,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.http import Http404, HttpRequest, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_GET
 
 from apps.composer.models import PlatformPost
 from apps.members.models import WorkspaceMembership
@@ -28,6 +29,14 @@ logger = logging.getLogger(__name__)
 
 RANGE_CHOICES = (7, 30, 90)
 DEFAULT_RANGE = 30
+
+
+@login_required
+@require_GET
+def analytics_status(request, workspace_id, account_id):
+    workspace = _get_workspace(request, workspace_id)
+    account = get_object_or_404(SocialAccount, pk=account_id, workspace=workspace, platform="instagram")
+    return render(request, "analytics/_instagram_status.html", {"account": account, "workspace_id": workspace.id})
 
 
 def _get_workspace(request, workspace_id):

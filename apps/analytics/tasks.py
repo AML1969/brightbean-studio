@@ -346,6 +346,13 @@ def _analytics_provider_and_token(account) -> tuple:
     let the health check, which owns ``connection_status``, decide the rest.
     """
     provider = _resolve_provider(account)
+    if account.platform == "instagram":
+        from .instagram_access import resolve_token
+
+        account._instagram_analytics_failed = False
+        account._instagram_analytics_status_recorded = None
+        if account.oauth_facebook_user_access_token:
+            return provider, resolve_token(account)
     access_token = account.oauth_access_token
     if not (account.token_expires_within(_ANALYTICS_REFRESH_WINDOW) and account.oauth_refresh_token):
         return provider, access_token
@@ -356,7 +363,8 @@ def _analytics_provider_and_token(account) -> tuple:
         if _is_dead_grant(exc):
             logger.warning("analytics: OAuth grant for %s is gone (%s); flagging for reconnect", account, exc)
             _mark_needs_reconnect(account)
-            _enqueue_health_check(account)
+            if account.platform != "instagram":
+                _enqueue_health_check(account)
         else:
             logger.warning("analytics: token refresh failed for %s: %s", account, exc)
     return provider, access_token
@@ -611,10 +619,10 @@ def _sync_account_metrics(
             # per-day warning that the hourly cron quietly forgets.
             raise
         except Exception as exc:
-            if _is_insufficient_scope(exc):
-                _mark_needs_reconnect(account)
+            _record_analytics_error(account, exc, provider)
             logger.warning("get_account_metrics failed for %s on %s: %s", account, target, exc)
             return
+        _record_instagram_success(account)
         _refresh_follower_count(account, metrics)
         fetched_followers = getattr(metrics, "followers", None)
         if fetched_followers is not None:
@@ -702,8 +710,7 @@ def _sync_youtube_post_analytics(
         # The caller owns breaker/reconnect handling and must see it.
         raise
     except Exception as exc:
-        if _is_insufficient_scope(exc):
-            _mark_needs_reconnect(account)
+        _record_analytics_error(account, exc, provider)
         retryable = isinstance(exc, APIError) and exc.status_code is not None and exc.status_code >= 500
         if retryable and retry_attempt < len(_YOUTUBE_POST_ANALYTICS_RETRY_DELAYS):
             delay = _YOUTUBE_POST_ANALYTICS_RETRY_DELAYS[retry_attempt]
@@ -817,7 +824,8 @@ def retry_youtube_post_analytics(account_id: str, on_date_iso: str, attempt: int
     except TokenExpiredError:
         logger.warning("YouTube optional Analytics retry token rejected for account %s", account.id)
         _mark_needs_reconnect(account)
-        _enqueue_health_check(account)
+        if account.platform != "instagram":
+            _enqueue_health_check(account)
 
 
 def _has_unusable_platform_post_id(post, platform: str) -> bool:
@@ -856,11 +864,11 @@ def _sync_post_metrics(post, on_date: dt_date, *, provider=None, access_token: s
     except (QuotaExceededError, TokenExpiredError):
         raise
     except Exception as exc:
-        if _is_insufficient_scope(exc):
-            _mark_needs_reconnect(account)
+        _record_analytics_error(account, exc, provider)
         logger.warning("get_post_metrics failed for post %s (%s): %s", post.id, account.platform, exc)
         _record_post_sync_failure([post.pk])
         return
+    _record_instagram_success(account)
     _write_post_metrics_snapshot(post, metrics, account.platform, on_date)
     _record_post_sync_success([post.pk])
 
@@ -946,8 +954,7 @@ def _sync_account_posts(
             # those posts so a bad response cannot make the whole account due
             # again on the next tick, then continue with later chunks.
             first_error = first_error or exc
-            if _is_insufficient_scope(exc):
-                _mark_needs_reconnect(account)
+            _record_analytics_error(account, exc, provider)
             attempted_at = timezone.now()
             _record_post_sync_failure([p.pk for p in by_platform_id.values()], attempted_at)
             failed += len(by_platform_id)
@@ -1029,12 +1036,12 @@ def _sync_account_posts_individually(
             api_calls += 1
             failed += 1
             first_error = first_error or exc
-            if _is_insufficient_scope(exc):
-                _mark_needs_reconnect(account)
+            _record_analytics_error(account, exc, provider)
             logger.debug("get_post_metrics failed for post %s (%s): %s", post.id, account.platform, exc)
             _record_post_sync_failure([post.pk], timezone.now())
             continue
         api_calls += 1
+        _record_instagram_success(account)
         attempted_at = timezone.now()
         with transaction.atomic():
             _write_post_metrics_snapshot(post, metrics, account.platform, on_date)
@@ -1073,7 +1080,30 @@ def _refresh_follower_count(account, metrics) -> None:
     account.save(update_fields=["follower_count", "updated_at"])
 
 
+def _record_analytics_error(account, exc, provider):
+    if account.platform == "instagram":
+        from .instagram_access import record_failure
+
+        record_failure(account, exc, provider)
+    elif _is_insufficient_scope(exc):
+        _mark_needs_reconnect(account)
+
+
+def _record_instagram_success(account):
+    if account.platform == "instagram":
+        from .instagram_access import record_success
+
+        record_success(account)
+
+
 def _mark_needs_reconnect(account):
+    if account.platform == "instagram":
+        from apps.social_accounts.models import SocialAccount
+
+        from .instagram_access import record_status
+
+        record_status(account, SocialAccount.AnalyticsStatus.RECONNECT, "expired_user_token")
+        return
     if account.analytics_needs_reconnect:
         return
     account.analytics_needs_reconnect = True
@@ -1193,6 +1223,8 @@ def _handle_quota_exhaustion(account, exc, *, key: str, scope: str | None = None
     """
     from apps.common import quota
 
+    if account.platform == "instagram":
+        _record_analytics_error(account, exc, None)
     quota.trip_from_exception(
         account.platform,
         key,
@@ -1261,7 +1293,8 @@ def _sync_one_account(account, on_date, now, *, cache, force_today=False, deadli
         # count it against any post — none of them were really attempted.
         logger.warning("analytics: %s rejected our token for %s; flagging for reconnect", account.platform, account)
         _mark_needs_reconnect(account)
-        _enqueue_health_check(account)
+        if account.platform != "instagram":
+            _enqueue_health_check(account)
         logger.debug("token rejection detail for %s: %s", account, exc)
         return 0, 0, 0
 
@@ -1347,7 +1380,8 @@ def backfill_account_analytics(account_id: str, days: int | None = None) -> None
     except TokenExpiredError:
         logger.warning("analytics: %s rejected our token during backfill of %s", account.platform, account)
         _mark_needs_reconnect(account)
-        _enqueue_health_check(account)
+        if account.platform != "instagram":
+            _enqueue_health_check(account)
         return
 
     logger.info(

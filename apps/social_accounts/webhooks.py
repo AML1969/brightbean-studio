@@ -270,12 +270,26 @@ def record_missing_scopes(account) -> list[str]:
         logger.exception("Could not read granted scopes for %s (%s)", account.id, account.platform)
         return []
 
+    filters = {"pk": account.pk}
+    if account.platform == "instagram":
+        filters["analytics_credentials_version"] = account.analytics_credentials_version
     if granted is None:
-        SocialAccount.objects.filter(pk=account.pk).update(missing_scopes=[])
+        SocialAccount.objects.filter(**filters).update(missing_scopes=[])
         return []
 
     missing = sorted(set(provider.required_scopes) - granted)
-    SocialAccount.objects.filter(pk=account.pk).update(missing_scopes=missing)
+    if account.platform == "instagram":
+        from apps.analytics.instagram_access import INSIGHTS_SCOPE, grant_details
+
+        missing = [scope for scope in missing if scope != INSIGHTS_SCOPE]
+        try:
+            _, user_scopes = grant_details(account, provider)
+        except Exception:
+            user_scopes = None
+            logger.warning("Could not inspect Instagram analytics consent for account %s", account.pk)
+        if INSIGHTS_SCOPE in provider.required_scopes and user_scopes is not None and INSIGHTS_SCOPE not in user_scopes:
+            missing.append(INSIGHTS_SCOPE)
+    SocialAccount.objects.filter(**filters).update(missing_scopes=sorted(missing))
     if missing:
         logger.warning(
             "Account %s (%s) connected without %s; those features will fail.",

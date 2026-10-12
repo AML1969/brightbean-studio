@@ -1154,6 +1154,7 @@ class TestSyncAllAccountAnalyticsEfficiency:
         with (
             patch("apps.analytics.tasks.timezone.now", side_effect=[first_attempt, second_attempt]),
             patch("apps.analytics.tasks._record_post_sync_failure") as record_failure,
+            patch("apps.analytics.tasks._record_analytics_error"),
         ):
             _sync_account_posts(account, provider, "tok", posts, first_attempt.date())
 

@@ -151,3 +151,48 @@ class TestConnectionLinkPageTokens:
         error = client.session["connection_link_error"]
         assert "Page Two" in error
         assert "Page One" not in error
+
+    @pytest.mark.parametrize("promoted,expiry_seconds", [(True, 5184000), (False, 3600)])
+    def test_instagram_link_preserves_separate_credentials_for_all_channels(
+        self, client, workspace, connection_link, promoted, expiry_seconds
+    ):
+        from apps.social_accounts.models import SocialAccount
+
+        started = timezone.now()
+        nonce = "nonce-instagram"
+        state = _sign_connection_link_state(workspace.id, "instagram", connection_link.token, nonce)
+        session = client.session
+        session[CONNECTION_LINK_OAUTH_SESSION_KEY] = {
+            "nonce": nonce,
+            "workspace_id": str(workspace.id),
+            "platform": "instagram",
+            "token": connection_link.token,
+        }
+        session.save()
+        provider = MagicMock()
+        provider.get_user_pages.return_value = [
+            {"id": f"ig-{i}", "name": f"Channel {i}", "access_token": f"page-{i}"} for i in range(5)
+        ]
+        user_tokens = OAuthTokens(access_token="user", expires_in=expiry_seconds)
+        with (
+            patch("apps.onboarding.views._get_provider_for_platform", return_value=provider),
+            patch("apps.onboarding.views.promote_meta_user_token", return_value=(user_tokens, promoted)),
+            patch("apps.social_accounts.views.subscribe_account_webhooks_task"),
+        ):
+            response = client.get(
+                reverse("onboarding:oauth_callback", kwargs={"platform": "instagram"}),
+                {
+                    "code": "code",
+                    "state": state,
+                },
+            )
+        assert response.status_code == 302
+        assert SocialAccount.objects.filter(workspace=workspace).count() == 5
+        for i in range(5):
+            account = SocialAccount.objects.get(workspace=workspace, account_platform_id=f"ig-{i}")
+            assert account.oauth_access_token == f"page-{i}"
+            assert account.oauth_facebook_user_access_token == "user"
+            assert started + timezone.timedelta(seconds=expiry_seconds) <= account.facebook_user_token_expires_at
+            assert account.facebook_user_token_expires_at <= timezone.now() + timezone.timedelta(seconds=expiry_seconds)
+            assert (account.token_expires_at is None) == promoted
+            assert account.connection_status == "connected"

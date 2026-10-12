@@ -373,6 +373,11 @@ def oauth_callback(request, platform):
                         # path it is the short-lived expiry, which the account
                         # must carry to be seen as expiring at all.
                         "expires_in": None if promoted else tokens.expires_in,
+                        "user_expires_at": (
+                            (timezone.now() + timedelta(seconds=tokens.expires_in)).isoformat()
+                            if tokens.expires_in
+                            else None
+                        ),
                     },
                     "pages": pages,
                 }
@@ -520,6 +525,8 @@ def select_account(request):
                 access_token=access_token,
                 refresh_token=user_tokens.get("refresh_token"),
                 expires_in=user_tokens.get("expires_in"),
+                facebook_user_access_token=user_tokens.get("access_token", "") if platform == "instagram" else None,
+                facebook_user_token_expires_at=user_tokens.get("user_expires_at"),
                 # Instagram-via-Facebook receives its webhooks through the
                 # linked Page, so remember which Page to subscribe.
                 webhook_target_id=page.get("page_id", ""),
@@ -984,17 +991,32 @@ def _create_or_update_account(
     expires_in=None,
     instance_url="",
     webhook_target_id="",
+    facebook_user_access_token=None,
+    facebook_user_token_expires_at=None,
 ):
     """Create or update a SocialAccount from OAuth results."""
     token_expires_at = None
     if expires_in:
         token_expires_at = timezone.now() + timedelta(seconds=expires_in)
 
+    analytics_defaults = {}
+    if platform == "instagram" and facebook_user_access_token is not None:
+        from django.utils.dateparse import parse_datetime
+
+        if isinstance(facebook_user_token_expires_at, str):
+            facebook_user_token_expires_at = parse_datetime(facebook_user_token_expires_at)
+        analytics_defaults = {
+            "oauth_facebook_user_access_token": facebook_user_access_token,
+            "facebook_user_token_expires_at": facebook_user_token_expires_at,
+            "analytics_status": SocialAccount.AnalyticsStatus.CHECKING,
+        }
+
     account, created = SocialAccount.objects.update_or_create(
         workspace_id=workspace_id,
         platform=platform,
         account_platform_id=profile.platform_id,
         defaults={
+            **analytics_defaults,
             "account_name": profile.name,
             "account_handle": profile.handle or "",
             "avatar_url": profile.avatar_url or "",

@@ -105,11 +105,12 @@ Usage: {% include "social_accounts/partials/_account_card.html" with account=acc
     breaks later, at publish or insights time, with an opaque platform error.
     Naming them here turns that into something the user can act on.
     {% endcomment %}
-    {% if account.missing_scopes %}
+    {% include "analytics/_instagram_status.html" %}
+    {% if account.connection_missing_scopes %}
     <div class="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
         <p class="text-xs text-amber-800">
             <span class="font-semibold">Some features are unavailable.</span>
-            This account was connected without {{ account.missing_scopes|join:", " }}.
+            This account was connected without {{ account.connection_missing_scopes|join:", " }}.
             Anything relying on them will fail until the permission is granted — reconnect to try again.
         </p>
     </div>

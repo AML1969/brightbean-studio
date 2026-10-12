@@ -608,6 +608,38 @@ class InstagramProvider(SocialProvider):
         data = resp.json()
         return ReplyResult(platform_message_id=data.get("id", ""), extra=data)
 
+    def inspect_token(self, access_token: str) -> dict | None:
+        """Inspect credential identity without confusing Page scopes with consent."""
+        client_id = self.credentials.get("client_id")
+        client_secret = self.credentials.get("client_secret")
+        if not client_id or not client_secret:
+            return None
+        resp = self._request(
+            "GET",
+            f"{BASE_URL}/debug_token",
+            params={"input_token": access_token, "access_token": f"{client_id}|{client_secret}"},
+        )
+        return resp.json().get("data") or None
+
+    def get_user_granted_scopes(self, user_access_token: str = "", *, user_id: str = "") -> set[str] | None:
+        """Read the person's consent, using their token or an app-authorized ID."""
+        access_token = user_access_token
+        target = "me"
+        if user_id:
+            client_id = self.credentials.get("client_id")
+            client_secret = self.credentials.get("client_secret")
+            if not client_id or not client_secret:
+                return None
+            access_token = f"{client_id}|{client_secret}"
+            target = user_id
+        if not access_token:
+            return None
+        resp = self._request("GET", f"{BASE_URL}/{target}/permissions", access_token=access_token)
+        data = resp.json().get("data")
+        if not isinstance(data, list):
+            return None
+        return {row["permission"] for row in data if row.get("status") == "granted" and row.get("permission")}
+
     def get_granted_scopes(self, access_token: str) -> set[str] | None:
         """Read the grant back by inspecting the token itself.
 

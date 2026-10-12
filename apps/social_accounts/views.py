@@ -530,6 +530,9 @@ def select_account(request):
                 # Instagram-via-Facebook receives its webhooks through the
                 # linked Page, so remember which Page to subscribe.
                 webhook_target_id=page.get("page_id", ""),
+                messaging_access=False
+                if platform == "instagram" and not page.get("access_token")
+                else page.get("can_message"),
             )
             connected.append(page["name"])
 
@@ -969,8 +972,8 @@ def resolve_page_account_token(page: dict, platform: str, user_access_token: str
     revokes the app for the whole person — makes a per-account disconnect able
     to sever every other connection they have.
 
-    Instagram-via-Facebook is the one exception: its calls address the IG user,
-    so the user token is the correct credential when the Page dict carries none.
+    Legacy Instagram publishing/comments can fall back to the user token when
+    Meta omits the Page token. Such a connection must keep DMs disabled.
 
     Returns "" when no usable token exists, which callers must treat as "cannot
     connect this account" rather than substituting one.
@@ -993,6 +996,7 @@ def _create_or_update_account(
     webhook_target_id="",
     facebook_user_access_token=None,
     facebook_user_token_expires_at=None,
+    messaging_access=None,
 ):
     """Create or update a SocialAccount from OAuth results."""
     token_expires_at = None
@@ -1026,6 +1030,7 @@ def _create_or_update_account(
             "token_expires_at": token_expires_at,
             "instance_url": instance_url,
             "webhook_target_id": webhook_target_id or "",
+            "messaging_access": messaging_access,
             "connection_status": SocialAccount.ConnectionStatus.CONNECTED,
             "last_error": "",
             # Fresh OAuth grant invalidates any prior analytics-scope failure.

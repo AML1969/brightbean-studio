@@ -364,7 +364,7 @@ CSP_STYLE_SRC = ("'self'", "'unsafe-inline'", "https://cdn.jsdelivr.net")
 CSP_IMG_SRC = ("'self'", "data:", "blob:", "https:")
 CSP_FONT_SRC = ("'self'",)
 CSP_CONNECT_SRC = ("'self'", "https://cdn.jsdelivr.net")
-CSP_MEDIA_SRC = ("'self'", "blob:")
+CSP_MEDIA_SRC = ("'self'", "blob:", "https:")
 CSP_FORM_ACTION = (
     "'self'",
     "https://accounts.google.com",
@@ -458,6 +458,7 @@ _META_CREDENTIALS = {
     # Optional Facebook Login for Business configuration. When present Meta
     # controls the permission and business-asset selection through this config.
     "config_id": env("PLATFORM_FACEBOOK_CONFIG_ID", default=""),
+    "human_agent_enabled": env.bool("PLATFORM_FACEBOOK_HUMAN_AGENT_ENABLED", default=False),
 }
 _GOOGLE_CREDENTIALS = {
     "client_id": env("PLATFORM_GOOGLE_CLIENT_ID", default=""),
@@ -466,6 +467,7 @@ _GOOGLE_CREDENTIALS = {
 _INSTAGRAM_LOGIN_CREDENTIALS = {
     "app_id": env("PLATFORM_INSTAGRAM_APP_ID", default=""),
     "app_secret": env("PLATFORM_INSTAGRAM_APP_SECRET", default=""),
+    "human_agent_enabled": env.bool("PLATFORM_INSTAGRAM_HUMAN_AGENT_ENABLED", default=False),
 }
 # Threads has its own app identity: a Meta app carrying the "Access the Threads
 # API" use case gets a Threads App ID / Secret distinct from the Facebook pair

@@ -506,6 +506,9 @@ def connection_oauth_callback(request, platform):
                         # Instagram-via-Facebook receives its webhooks through
                         # the linked Page, so remember which Page to subscribe.
                         webhook_target_id=page.get("page_id", ""),
+                        messaging_access=False
+                        if platform == "instagram" and not page.get("access_token")
+                        else page.get("can_message"),
                     )
                     ConnectionLinkUsage.objects.get_or_create(
                         connection_link=link,

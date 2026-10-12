@@ -149,3 +149,15 @@ class APIError(ProviderError):
     ):
         self.status_code = status_code
         super().__init__(message, **kwargs)
+
+
+class MessagingError(APIError):
+    """A safe, actionable messaging error that can be shown to the sender."""
+
+
+class WebhookChannelError(APIError):
+    """A subscription failed for a named channel after other channels succeeded."""
+
+    def __init__(self, message: str, *, needs_reconnect: bool = False, **kwargs):
+        self.needs_reconnect = needs_reconnect
+        super().__init__(message, **kwargs)

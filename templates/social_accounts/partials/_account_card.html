@@ -116,6 +116,9 @@ Usage: {% include "social_accounts/partials/_account_card.html" with account=acc
     </div>
     {% endif %}
 
+    {% if account.messaging_access is False %}
+    <p class="mt-3 text-xs text-amber-800">DMs unavailable: grant messaging access on the linked Facebook Page, then reconnect this account.</p>
+    {% endif %}
     {% if account.last_error and account.connection_status == "error" %}
     <div class="mt-3 px-3 py-2 bg-red-50 rounded-lg">
         <p class="text-xs text-red-600 truncate">{{ account.last_error }}</p>
@@ -140,9 +143,9 @@ Usage: {% include "social_accounts/partials/_account_card.html" with account=acc
     <div class="mt-3 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg">
         <div class="flex items-start justify-between gap-3">
             <p class="text-xs text-amber-800">
-                <span class="font-semibold">Real-time comments are off.</span>
+                <span class="font-semibold">Some real-time inbox updates are unavailable.</span>
                 {{ account.webhook_error|default:"We couldn't set up real-time updates for this account." }}
-                New comments still reach the inbox, but can take a few minutes to appear.
+                Activity with the required permissions can still arrive through polling.
             </p>
             {% if account.webhook_needs_reconnect %}
             <form method="post" action="{% url 'social_accounts:reconnect' workspace_id=workspace_id account_id=account.id %}">

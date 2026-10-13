@@ -66,12 +66,13 @@ class StudioWorker:
 
     def _execute(self, lane: str, task: Task) -> None:
         started = time.monotonic()
+        task_id = task.pk  # bg_runner deletes the Task and clears its pk.
         delay = max(0.0, (timezone.now() - task.run_at).total_seconds())
         logger.info(
             "Studio task started lane=%s task=%s id=%s dispatch_delay_seconds=%.3f",
             lane,
             task.task_name,
-            task.pk,
+            task_id,
             delay,
         )
         try:
@@ -84,7 +85,7 @@ class StudioWorker:
                 "Studio task finished lane=%s task=%s id=%s duration_seconds=%.3f",
                 lane,
                 task.task_name,
-                task.pk,
+                task_id,
                 time.monotonic() - started,
             )
 

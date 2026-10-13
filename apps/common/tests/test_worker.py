@@ -95,6 +95,7 @@ def test_publishing_and_confirmation_run_during_blocked_inbox_and_large_backlog(
         assert Task.objects.filter(task_name="test.maintenance", locked_at__isnull=False).count() == 0
     assert "dispatch_delay_seconds=" in caplog.text
     assert "duration_seconds=" in caplog.text
+    assert "id=None" not in caplog.text
 
 
 def test_two_publish_cycles_never_overlap(registry):

@@ -145,7 +145,12 @@ def subscribe_account_webhooks(account) -> bool:
         )
         return False
 
-    if subscribed and account.platform == "instagram" and not account.webhook_target_id:
+    if (
+        subscribed
+        and account.platform == "instagram"
+        and not account.webhook_target_id
+        and not account.instagram_dm_permission_request_disabled
+    ):
         record_subscription_result(
             account,
             False,
@@ -229,9 +234,13 @@ def retry_failed_subscription(account) -> bool:
         return False
     if account.webhooks_active is not False:
         return False
-    if account.webhook_needs_reconnect:
+    warning = account.webhook_warning
+    if warning is not None and warning.needs_reconnect:
         return False
-    if (account.webhook_retry_count or 0) >= MAX_AUTOMATIC_RETRIES:
+    # A DM-only verdict no longer applies after its consent scope is disabled.
+    # Recheck comments once even if that obsolete failure exhausted the budget;
+    # success resets it, and any new failure resumes the normal retry limits.
+    if warning is not None and (account.webhook_retry_count or 0) >= MAX_AUTOMATIC_RETRIES:
         logger.info(
             "Not retrying webhooks for %s: %d automatic attempts already spent.",
             account.id,

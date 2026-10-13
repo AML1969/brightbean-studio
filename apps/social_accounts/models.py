@@ -1,6 +1,7 @@
 import uuid
 from typing import Any
 
+from django.conf import settings
 from django.db import models, transaction
 
 from apps.common.encryption import EncryptedTextField
@@ -190,6 +191,14 @@ class SocialAccount(models.Model):
             return super().save(*args, **kwargs)
 
     @property
+    def instagram_dm_permission_request_disabled(self):
+        return (
+            self.platform == "instagram"
+            and "instagram_manage_messages" in self.missing_scopes
+            and not settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED
+        )
+
+    @property
     def connection_missing_scopes(self):
         # Instagram analytics has its own grant-aware status. A Page token's
         # scope list cannot establish whether the person declined insights.
@@ -197,7 +206,20 @@ class SocialAccount(models.Model):
             scope
             for scope in self.missing_scopes
             if self.platform != "instagram" or scope != "instagram_manage_insights"
+            if scope != "instagram_manage_messages" or not self.instagram_dm_permission_request_disabled
         ]
+
+    @property
+    def webhook_warning(self):
+        """The subscription warning and action applicable to current OAuth scopes."""
+        from .error_messages import WebhookFailure, omit_disabled_instagram_dm_failure
+
+        if self.webhooks_active is not False:
+            return None
+        failure = WebhookFailure(self.webhook_error, self.webhook_needs_reconnect)
+        if self.instagram_dm_permission_request_disabled and "pages_manage_metadata" not in self.missing_scopes:
+            return omit_disabled_instagram_dm_failure(failure)
+        return failure
 
     @property
     def instagram_analytics_message(self):

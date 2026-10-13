@@ -120,7 +120,12 @@ def test_rechecking_obsolete_dm_failure_does_not_reset_comment_retry_limit(insta
     )
     instagram_account.save()
     instance = InstagramProvider(
-        {"client_id": "app-1", "page_id": "page-1", "missing_scopes": instagram_account.missing_scopes}
+        {
+            "client_id": "app-1",
+            "page_id": "page-1",
+            "missing_scopes": instagram_account.missing_scopes,
+            "dm_oauth_scopes_enabled": False,
+        }
     )
     instance._request = MagicMock(side_effect=APIError("temporarily unavailable", status_code=500))
     with patch("apps.social_accounts.webhooks._get_provider_for_platform", return_value=instance):

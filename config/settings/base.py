@@ -452,7 +452,7 @@ if SENTRY_DSN:
     )
 
 # Platform credentials env vars (cloud version)
-PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = env.bool("PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED", default=False)
+PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = env.bool("PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED", default=True)
 _META_CREDENTIALS = {
     "app_id": env("PLATFORM_FACEBOOK_APP_ID", default=""),
     "app_secret": env("PLATFORM_FACEBOOK_APP_SECRET", default=""),

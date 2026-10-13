@@ -279,10 +279,9 @@ class SocialAccount(models.Model):
         ``refresh_token`` raises so callers decide between degrading (publish
         engine keeps the old token) and aborting (composer endpoints 502).
 
-        ``enqueue_backfill=False`` is for scheduled analytics refreshes. The
-        token rotation itself is enough for that sync pass; queueing the
-        ``oauth_access_token`` post-save signal as well would start a duplicate
-        full backfill every time an hourly run refreshes a near-expiry token.
+        ``enqueue_backfill=False`` is for routine token rotations (publishing,
+        analytics, inbox polls, and composer lookups). A rotation is not a new
+        connection and must not queue a full historical analytics backfill.
         """
         from datetime import timedelta
 

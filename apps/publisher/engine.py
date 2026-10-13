@@ -324,7 +324,7 @@ def _provider_and_access_token(account):
     access_token = account.oauth_access_token
     if account.token_expires_within(_PUBLISH_REFRESH_WINDOW) and account.oauth_refresh_token:
         try:
-            access_token = account.refresh_oauth_token(provider)
+            access_token = account.refresh_oauth_token(provider, enqueue_backfill=False)
             logger.info("Refreshed token for %s", account)
         except Exception:
             logger.exception("Token refresh failed for %s", account)

@@ -49,7 +49,7 @@ def enqueue_analytics_backfill(sender, instance: SocialAccount, created: bool, u
     if instance.platform == "instagram":
         transaction.on_commit(lambda: backfill_account_analytics(str(instance.id), remove_existing_tasks=True))
     else:
-        backfill_account_analytics(str(instance.id))
+        backfill_account_analytics(str(instance.id), remove_existing_tasks=True)
 
 
 @receiver(pre_save, sender=AnalyticsPlatformConfig)

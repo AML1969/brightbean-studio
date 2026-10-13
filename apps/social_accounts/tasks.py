@@ -59,6 +59,7 @@ def check_social_account_health(account_id: str):
     # 60 days — so a refresh is always the right move when expiry is unknown.
     # Platforms whose refresh token outlives the access token are deliberately
     # left out: for them an unknown expiry means nothing needs doing yet.
+    tokens_refreshed = False
     needs_expiry_bootstrap = account.platform in EXPIRY_BOOTSTRAP_PLATFORMS and account.token_expires_at is None
     if (account.is_token_expiring_soon or needs_expiry_bootstrap) and account.oauth_refresh_token:
         try:
@@ -68,6 +69,7 @@ def check_social_account_health(account_id: str):
                 account.oauth_refresh_token = new_tokens.refresh_token
             if new_tokens.expires_in:
                 account.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
+            tokens_refreshed = True
             account.connection_status = SocialAccount.ConnectionStatus.CONNECTED
             account.last_error = ""
             logger.info("Health check: refreshed token for %s", account)
@@ -148,21 +150,26 @@ def check_social_account_health(account_id: str):
             account.last_error = friendly_health_check_error(e)
 
     account.last_health_check_at = timezone.now()
-    account.save(
-        update_fields=[
-            "oauth_access_token",
-            "oauth_refresh_token",
-            "token_expires_at",
-            "follower_count",
-            "avatar_url",
-            "account_name",
-            "account_handle",
-            "connection_status",
-            "last_error",
-            "last_health_check_at",
-            "updated_at",
-        ]
-    )
+    fields = [
+        "follower_count",
+        "avatar_url",
+        "account_name",
+        "account_handle",
+        "connection_status",
+        "last_error",
+        "last_health_check_at",
+        "updated_at",
+    ]
+    # A health check is not a reconnect. Suppress analytics fan-out even when
+    # it rotates a token, and avoid overwriting a concurrent publisher's fresh
+    # tokens when this check did not refresh them.
+    if tokens_refreshed:
+        fields.extend(["oauth_access_token", "oauth_refresh_token", "token_expires_at"])
+    account._skip_analytics_backfill = True
+    try:
+        account.save(update_fields=fields)
+    finally:
+        del account._skip_analytics_backfill
 
     # A fix for a broken subscription is worthless if nothing re-runs it; this
     # is the only thing that does so unattended. Bounded inside

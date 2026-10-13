@@ -289,6 +289,35 @@ class WebhookFailure(NamedTuple):
     needs_reconnect: bool
 
 
+def omit_disabled_instagram_dm_failure(failure: WebhookFailure) -> WebhookFailure | None:
+    """Remove known, persisted DM-only failures when messaging consent is omitted.
+
+    Legacy subscription state stores combined channel errors as text. Match
+    only the provider's known DM messages, leaving metadata and unrecognised
+    errors intact. A remaining transient comment failure must offer a retry,
+    even if the removed DM failure originally required reconnecting.
+    """
+    message = failure.message
+    for obsolete in (
+        "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram.",
+        "DM notifications failed. Check messaging permissions and reconnect Instagram.",
+        "DM notifications failed. Try again.",
+        "DM notifications could not be confirmed on the linked Page.",
+        "Comment notifications are connected. Reconnect Instagram to enable DM notifications on its linked Page.",
+    ):
+        message = message.replace(obsolete, "")
+    if message == failure.message:
+        return failure
+    message = message.strip()
+    if not message:
+        return None
+    retryable_comment_failure = message in (
+        "Comment/mention notifications were not enabled.",
+        "Comment/mention notifications failed. Try again.",
+    )
+    return WebhookFailure(message, failure.needs_reconnect and not retryable_comment_failure)
+
+
 def classify_webhook_failure(exc: Exception) -> WebhookFailure:
     """Map a failed webhook subscription to user-facing text and a next step.
 

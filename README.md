@@ -465,6 +465,35 @@ Message controls → Connected tools → Allow access to messages**. Reconnect e
 accounts after adding permissions, including permissions in any Login for Business
 configuration. Missing DM permissions do not disable publishing or comment polling.
 
+Instagram via Facebook Login requests `instagram_manage_messages` only when
+`PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED=true`. This deployment-level flag
+defaults to `false` and cannot be overridden through organization credential JSON.
+When false, OAuth omits only `instagram_manage_messages`; `pages_manage_metadata`
+and all existing publishing, comments, account-discovery, and analytics scopes
+remain requested. The setting applies to connections, reconnects, and client
+onboarding links. It controls new permission requests, not existing DM access:
+accounts with messaging grants keep receiving DMs and sending eligible replies.
+
+Enable the flag on staging for App Review testing and keep it false or unset in
+production until Meta approves `instagram_manage_messages`:
+
+```sh
+heroku config:set PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED=true --app brightbean-studio-staging
+heroku config:set PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED=false --app brightbean-studio-production
+```
+
+Environment changes require restarting the web and worker processes (Heroku
+config changes restart dynos automatically). After approval, enable the flag in
+production and reconnect accounts that need messaging grants. Turning the flag
+off preserves stored tokens and inbox messages. Facebook Messenger, Instagram
+Direct, and Human Agent configuration are unaffected.
+
+When `PLATFORM_FACEBOOK_CONFIG_ID` is set, Facebook Login for Business gets its
+permissions from Meta's configuration rather than the OAuth scope list. The flag
+does not rewrite that configuration. Use an approved-only production configuration
+that excludes unapproved `instagram_manage_messages` while retaining
+`pages_manage_metadata`, and a messaging-enabled configuration on staging.
+
 For external customers, complete Meta App Review, the required Advanced Access,
 and business verification. Prepare a review recording showing login and account
 selection, a customer DM appearing in Studio, an incoming attachment, a text reply,

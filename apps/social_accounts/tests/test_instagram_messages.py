@@ -7,7 +7,12 @@ from django.core.management import call_command
 
 from apps.publisher.engine import _resolve_publish_credentials
 from apps.social_accounts.models import SocialAccount
-from apps.social_accounts.webhooks import subscribe_account_webhooks, unsubscribe_account_webhooks
+from apps.social_accounts.webhooks import (
+    MAX_AUTOMATIC_RETRIES,
+    retry_failed_subscription,
+    subscribe_account_webhooks,
+    unsubscribe_account_webhooks,
+)
 from providers.exceptions import APIError
 from providers.instagram import InstagramProvider
 
@@ -41,6 +46,23 @@ def test_resolved_credentials_keep_both_ids_and_grant_state(instagram_account):
     assert credentials["messaging_access"] is False
 
 
+def test_omitted_oauth_permission_is_still_recorded_as_missing(instagram_account, settings):
+    from apps.social_accounts.webhooks import record_missing_scopes
+
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+    instance = InstagramProvider({"client_id": "app-1", "client_secret": "secret"})
+    granted = set(instance.required_scopes) - {"instagram_manage_messages"}
+    instance.get_granted_scopes = MagicMock(return_value=granted)
+    with (
+        patch("apps.social_accounts.webhooks._get_provider_for_platform", return_value=instance),
+        patch("apps.analytics.instagram_access.grant_details", return_value=(None, granted)),
+    ):
+        assert record_missing_scopes(instagram_account) == ["instagram_manage_messages"]
+    instagram_account.refresh_from_db()
+    assert instagram_account.missing_scopes == ["instagram_manage_messages"]
+    assert instagram_account.connection_missing_scopes == []
+
+
 def test_subscription_service_injects_page_id(instagram_account):
     provider = InstagramProvider({"client_id": "app", "client_secret": "secret"})
     provider.subscribe_webhooks = MagicMock(return_value=True)
@@ -48,6 +70,84 @@ def test_subscription_service_injects_page_id(instagram_account):
         assert subscribe_account_webhooks(instagram_account)
     assert factory.call_args.kwargs["page_id"] == "page-1"
     assert factory.call_args.kwargs["ig_user_id"] == "ig-1"
+
+
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("page_id", ["page-1", ""])
+def test_obsolete_dm_failure_can_refresh_comment_subscription(instagram_account, settings, flag, page_id):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+    instagram_account.missing_scopes = ["instagram_manage_messages"]
+    instagram_account.webhook_target_id = page_id
+    instagram_account.webhooks_active = False
+    instagram_account.webhook_needs_reconnect = True
+    instagram_account.webhook_retry_count = MAX_AUTOMATIC_RETRIES
+    instagram_account.webhook_error = (
+        "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram."
+    )
+    instagram_account.save()
+    instance = InstagramProvider(
+        {
+            "client_id": "app-1",
+            "page_id": page_id,
+            "missing_scopes": instagram_account.missing_scopes,
+            "dm_oauth_scopes_enabled": flag,
+        }
+    )
+    instance._request = MagicMock(return_value=SimpleNamespace(json=lambda: {"success": True}))
+    with patch("apps.social_accounts.webhooks._get_provider_for_platform", return_value=instance):
+        assert retry_failed_subscription(instagram_account) is not flag
+    instagram_account.refresh_from_db()
+    if flag:
+        instance._request.assert_not_called()
+        assert instagram_account.webhook_needs_reconnect is True
+    else:
+        instance._request.assert_called_once()
+        assert instance._request.call_args.args[1].endswith("/ig-1/subscribed_apps")
+        assert instagram_account.webhooks_active is True
+        assert instagram_account.webhook_error == ""
+        assert instagram_account.webhook_needs_reconnect is False
+        assert instagram_account.webhook_retry_count == 0
+
+
+def test_rechecking_obsolete_dm_failure_does_not_reset_comment_retry_limit(instagram_account, settings):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+    instagram_account.missing_scopes = ["instagram_manage_messages"]
+    instagram_account.webhooks_active = False
+    instagram_account.webhook_needs_reconnect = True
+    instagram_account.webhook_retry_count = MAX_AUTOMATIC_RETRIES
+    instagram_account.webhook_error = (
+        "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram."
+    )
+    instagram_account.save()
+    instance = InstagramProvider(
+        {"client_id": "app-1", "page_id": "page-1", "missing_scopes": instagram_account.missing_scopes}
+    )
+    instance._request = MagicMock(side_effect=APIError("temporarily unavailable", status_code=500))
+    with patch("apps.social_accounts.webhooks._get_provider_for_platform", return_value=instance):
+        assert retry_failed_subscription(instagram_account) is False
+        instagram_account.refresh_from_db()
+        assert instagram_account.webhook_needs_reconnect is False
+        assert instagram_account.webhook_error == "Comment/mention notifications failed. Try again."
+        assert retry_failed_subscription(instagram_account) is False
+    instance._request.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        "Comment/mention notifications failed. Reconnect Instagram to restore comment permissions.",
+        "DM notifications require Page metadata permissions. Reconnect Instagram.",
+    ],
+)
+def test_disabling_dm_scopes_does_not_retry_missing_required_grants(instagram_account, settings, error):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+    instagram_account.missing_scopes = ["instagram_manage_messages"]
+    instagram_account.webhooks_active = False
+    instagram_account.webhook_needs_reconnect = True
+    instagram_account.webhook_error = error
+    with patch("apps.social_accounts.webhooks._get_provider_for_platform") as factory:
+        assert retry_failed_subscription(instagram_account) is False
+    factory.assert_not_called()
 
 
 def test_comment_permission_failure_records_reconnect_despite_successful_dm_subscription(instagram_account):

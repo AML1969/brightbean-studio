@@ -7,6 +7,7 @@ rejects it with errCode=10007.
 """
 
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from django.urls import reverse
@@ -30,6 +31,30 @@ def connection_link(db, workspace):
         workspace=workspace,
         expires_at=timezone.now() + timezone.timedelta(days=1),
     )
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("flag", [False, True])
+@pytest.mark.parametrize("business_login", [False, True])
+def test_instagram_connection_link_uses_dm_scope_flag(client, connection_link, settings, flag, business_login):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+    credentials = {"app_id": "ID", "app_secret": "SECRET"}
+    if business_login:
+        credentials["config_id"] = "config-1"
+    settings.PLATFORM_CREDENTIALS_FROM_ENV = {"instagram": credentials}
+    url = reverse("onboarding:connection_oauth_start", kwargs={"token": connection_link.token})
+    response = client.post(url, {"platform": "instagram"})
+    assert response.status_code == 302
+    query = parse_qs(urlparse(response.url).query)
+    assert query["client_id"] == ["ID"]
+    assert query["response_type"] == ["code"]
+    if business_login:
+        assert query["config_id"] == ["config-1"]
+        assert "scope" not in query
+    else:
+        scopes = query["scope"][0].split(",")
+        assert ("instagram_manage_messages" in scopes) is flag
+        assert {"pages_manage_metadata", "instagram_content_publish", "instagram_manage_comments"} <= set(scopes)
 
 
 @pytest.mark.django_db

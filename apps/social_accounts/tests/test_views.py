@@ -3,6 +3,7 @@
 import re
 from datetime import UTC, datetime, timedelta
 from unittest.mock import MagicMock, patch
+from urllib.parse import parse_qs, urlparse
 
 import httpx
 import pytest
@@ -70,6 +71,120 @@ class TestOAuthState:
 
 @pytest.mark.django_db
 class TestAccountListView:
+    @pytest.mark.parametrize("flag", [False, True])
+    @pytest.mark.parametrize(
+        "error",
+        [
+            "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram.",
+            "DM notifications failed. Check messaging permissions and reconnect Instagram.",
+            "Comment notifications are connected. Reconnect Instagram to enable DM notifications on its linked Page.",
+        ],
+    )
+    def test_saved_dm_warning_tracks_current_scope_flag(self, authenticated_client, workspace, settings, flag, error):
+        settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+        account = SocialAccount.objects.create(
+            workspace=workspace,
+            platform="instagram",
+            account_platform_id="ig-1",
+            account_name="Instagram",
+            missing_scopes=["instagram_manage_messages"],
+            messaging_access=False,
+            webhooks_active=False,
+            webhook_error=error,
+            webhook_needs_reconnect=True,
+        )
+        response = authenticated_client.get(reverse("social_accounts:list", kwargs={"workspace_id": workspace.id}))
+        body = response.content.decode()
+        assert ("Contact your administrator to enable it." in body) is not flag
+        assert ("Some real-time inbox updates are unavailable" in body) is flag
+        assert ("Reconnect" in body) is flag
+        # Rendering applies the current policy without modifying retained state.
+        account.refresh_from_db()
+        assert account.webhook_error == error
+        assert account.webhook_needs_reconnect is True
+
+    @pytest.mark.parametrize(
+        ("remaining_error", "missing_scopes", "needs_reconnect"),
+        [
+            (
+                "Comment/mention notifications failed. Reconnect Instagram to restore comment permissions.",
+                ["instagram_manage_messages"],
+                True,
+            ),
+            ("Comment/mention notifications failed. Try again.", ["instagram_manage_messages"], False),
+            (
+                "DM notifications require Page metadata permissions. Reconnect Instagram.",
+                ["instagram_manage_messages", "pages_manage_metadata"],
+                True,
+            ),
+            ("An unrecognised subscription failure.", ["instagram_manage_messages"], True),
+        ],
+    )
+    def test_disabling_dm_scopes_preserves_other_webhook_warnings(
+        self, authenticated_client, workspace, settings, remaining_error, missing_scopes, needs_reconnect
+    ):
+        settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+        dm_error = "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram."
+        account = SocialAccount.objects.create(
+            workspace=workspace,
+            platform="instagram",
+            account_platform_id="ig-1",
+            account_name="Instagram",
+            missing_scopes=missing_scopes,
+            webhooks_active=False,
+            webhook_error=f"{remaining_error} {dm_error}",
+            webhook_needs_reconnect=True,
+        )
+        response = authenticated_client.get(reverse("social_accounts:list", kwargs={"workspace_id": workspace.id}))
+        body = response.content.decode()
+        assert remaining_error in body
+        assert "Some real-time inbox updates are unavailable" in body
+        assert ("Reconnect" in body) is needs_reconnect
+        assert ("Try again" in body) is not needs_reconnect
+        if "pages_manage_metadata" not in missing_scopes:
+            assert dm_error not in body
+        assert account.webhook_warning.needs_reconnect is needs_reconnect
+
+    def test_saved_dm_warning_does_not_hide_missing_metadata(self, authenticated_client, workspace, settings):
+        settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+        SocialAccount.objects.create(
+            workspace=workspace,
+            platform="instagram",
+            account_platform_id="ig-1",
+            account_name="Instagram",
+            missing_scopes=["instagram_manage_messages", "pages_manage_metadata"],
+            webhooks_active=False,
+            webhook_error="DM notifications require messaging permissions and Page messaging access. Reconnect Instagram.",
+            webhook_needs_reconnect=True,
+        )
+        response = authenticated_client.get(reverse("social_accounts:list", kwargs={"workspace_id": workspace.id}))
+        body = response.content.decode()
+        assert "pages_manage_metadata" in body
+        assert "Some real-time inbox updates are unavailable" in body
+        assert "Reconnect" in body
+
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_intentionally_omitted_dm_permission_does_not_prompt_reconnect(
+        self, authenticated_client, workspace, settings, flag
+    ):
+        settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+        account = SocialAccount.objects.create(
+            workspace=workspace,
+            platform="instagram",
+            account_platform_id="ig-1",
+            account_name="Instagram",
+            missing_scopes=["instagram_manage_messages", "pages_manage_metadata"],
+            messaging_access=False,
+        )
+        response = authenticated_client.get(reverse("social_accounts:list", kwargs={"workspace_id": workspace.id}))
+        assert response.status_code == 200
+        assert account.missing_scopes == ["instagram_manage_messages", "pages_manage_metadata"]
+        assert "pages_manage_metadata" in account.connection_missing_scopes
+        assert ("instagram_manage_messages" in account.connection_missing_scopes) is flag
+        body = response.content.decode()
+        assert ("Contact your administrator to enable it." in body) is not flag
+        assert ("grant messaging access on the linked Facebook Page, then reconnect" in body) is flag
+
     def test_requires_authentication(self, client, workspace):
         url = reverse("social_accounts:list", kwargs={"workspace_id": workspace.id})
         response = client.get(url)
@@ -100,6 +215,37 @@ class TestAccountListView:
 
 @pytest.mark.django_db
 class TestConnectPlatformView:
+    @pytest.mark.parametrize("flag", [False, True])
+    @pytest.mark.parametrize("business_login", [False, True])
+    @pytest.mark.parametrize("entrypoint", ["connect", "reconnect"])
+    def test_instagram_scope_flag_in_each_connection_flow(
+        self, authenticated_client, workspace, settings, flag, business_login, entrypoint
+    ):
+        settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+        credentials = {"app_id": "ID", "app_secret": "SECRET"}
+        if business_login:
+            credentials["config_id"] = "config-1"
+        settings.PLATFORM_CREDENTIALS_FROM_ENV = {"instagram": credentials}
+        if entrypoint == "connect":
+            url = reverse("social_accounts:connect", kwargs={"workspace_id": workspace.id})
+        else:
+            account = SocialAccount.objects.create(
+                workspace=workspace, platform="instagram", account_platform_id="ig-1", account_name="Instagram"
+            )
+            url = reverse("social_accounts:reconnect", kwargs={"workspace_id": workspace.id, "account_id": account.id})
+        response = authenticated_client.post(url, {"platform": "instagram"})
+        assert response.status_code == 302
+        query = parse_qs(urlparse(response.url).query)
+        assert query["client_id"] == ["ID"]
+        assert query["response_type"] == ["code"]
+        if business_login:
+            assert query["config_id"] == ["config-1"]
+            assert "scope" not in query
+        else:
+            scopes = query["scope"][0].split(",")
+            assert ("instagram_manage_messages" in scopes) is flag
+            assert {"pages_manage_metadata", "instagram_content_publish", "instagram_manage_comments"} <= set(scopes)
+
     def test_get_shows_platform_grid(self, authenticated_client, workspace):
         url = reverse("social_accounts:connect", kwargs={"workspace_id": workspace.id})
         response = authenticated_client.get(url)

@@ -118,6 +118,37 @@ def test_missing_scope_and_page_task_have_actionable_errors(customer_dm, inbox_a
     assert "Page" in reply_eligibility(message)["reason"]
 
 
+@pytest.mark.parametrize("flag", [False, True])
+def test_instagram_missing_message_grant_has_appropriate_next_step(customer_dm, inbox_account, settings, flag):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = flag
+    inbox_account.platform = "instagram"
+    inbox_account.webhook_target_id = "page-1"
+    inbox_account.missing_scopes = ["instagram_manage_messages"]
+    inbox_account.save()
+    message = customer_dm()
+    result = reply_eligibility(message)
+    assert not result["can_send"]
+    assert ("Reconnect" in result["reason"]) is flag
+    assert ("administrator" in result["reason"]) is not flag
+
+
+def test_instagram_granted_message_scope_can_send_with_requests_disabled(customer_dm, inbox_account, settings, user):
+    settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED = False
+    inbox_account.platform = "instagram"
+    inbox_account.webhook_target_id = "page-1"
+    inbox_account.save()
+    message = customer_dm()
+    assert reply_eligibility(message)["can_send"]
+    provider = MagicMock()
+    provider.reply_to_message.return_value = SimpleNamespace(platform_message_id="sent-1")
+    reply = create_reply_draft(message=message, body="Thanks", author=user)
+    with patch("apps.inbox.services.get_provider", return_value=provider):
+        send_reply_now(reply, actor=user)
+    reply.refresh_from_db()
+    assert reply.status == InboxReply.Status.SENT
+    provider.reply_to_message.assert_called_once()
+
+
 def test_webhook_uses_customer_time_and_does_not_reingest_echo(inbox_account):
     stamp = timezone.now() - timedelta(hours=30)
     event = {

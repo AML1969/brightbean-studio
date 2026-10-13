@@ -28,19 +28,62 @@ def provider():
     )
 
 
-def test_oauth_requests_message_and_subscription_permissions():
+@pytest.mark.parametrize("flag", [None, False, True])
+def test_oauth_requests_only_the_enabled_message_permission(flag):
     instance = provider()
+    if flag is not None:
+        instance.credentials["dm_oauth_scopes_enabled"] = flag
     scopes = parse_qs(urlparse(instance.get_auth_url("https://example.com/cb", "s")).query)["scope"][0].split(",")
-    assert {
-        "instagram_manage_messages",
-        "pages_manage_metadata",
-        "instagram_content_publish",
-        "instagram_manage_comments",
-    } <= set(scopes)
+    assert "instagram_manage_messages" in instance.required_scopes
+    assert set(scopes) == set(instance.required_scopes) - ({"instagram_manage_messages"} if not flag else set())
+    assert "pages_manage_metadata" in scopes
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_business_login_preserves_its_configuration_in_both_flag_states(flag):
+    instance = provider()
+    instance.credentials["dm_oauth_scopes_enabled"] = flag
     instance.credentials["config_id"] = "config-1"
     query = parse_qs(urlparse(instance.get_auth_url("https://example.com/cb", "s")).query)
     assert query["config_id"] == ["config-1"]
     assert "scope" not in query
+    assert query["response_type"] == ["code"]
+    assert query["override_default_response_type"] == ["true"]
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_existing_grant_can_send_in_both_flag_states(flag):
+    instance = provider()
+    instance.credentials["dm_oauth_scopes_enabled"] = flag
+    instance._request = MagicMock(return_value=response({"message_id": "sent-1"}))
+    result = instance.reply_to_message("page-token", "incoming", "Thanks", {"sender_id": "customer"})
+    assert result.platform_message_id == "sent-1"
+    assert instance._request.call_args.args[1].endswith("/page-1/messages")
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_missing_message_scope_only_prompts_reconnect_when_requested(flag):
+    instance = provider()
+    instance.credentials.update(dm_oauth_scopes_enabled=flag, missing_scopes=["instagram_manage_messages"])
+    instance._request = MagicMock(return_value=response({"success": True}))
+    if flag:
+        with pytest.raises(WebhookChannelError, match="Reconnect") as error:
+            instance.subscribe_webhooks("page-token", "ig-1")
+        assert error.value.needs_reconnect
+    else:
+        assert instance.subscribe_webhooks("page-token", "ig-1")
+    assert instance._request.call_count == 1
+    assert instance._request.call_args.args[1].endswith("/ig-1/subscribed_apps")
+
+
+def test_metadata_scope_still_requires_reconnect_with_message_requests_off():
+    instance = provider()
+    instance.credentials["missing_scopes"] = ["instagram_manage_messages", "pages_manage_metadata"]
+    instance._request = MagicMock(return_value=response({"success": True}))
+    with pytest.raises(WebhookChannelError, match="Page metadata permissions.*Reconnect") as error:
+        instance.subscribe_webhooks("page-token", "ig-1")
+    assert error.value.needs_reconnect
+    assert instance._request.call_count == 1
 
 
 def test_poll_walks_both_cursors_and_ignores_own_messages():
@@ -135,6 +178,7 @@ def test_subscriptions_preserve_page_fields_and_read_back():
 
 def test_missing_permission_does_not_remove_comment_subscription():
     instance = provider()
+    instance.credentials["dm_oauth_scopes_enabled"] = True
     instance.credentials["missing_scopes"] = ["instagram_manage_messages"]
     instance._request = MagicMock(return_value=response({"success": True}))
     with pytest.raises(WebhookChannelError, match="DM notifications") as failure:

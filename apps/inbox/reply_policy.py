@@ -51,6 +51,10 @@ def reply_eligibility(message, *, origin=PROGRAMMATIC, actor=None, credentials=N
 
     if account.needs_reconnect or not account.oauth_access_token:
         return blocked("Reconnect this account before sending DMs.")
+    if account.instagram_dm_permission_request_disabled:
+        return blocked(
+            "Instagram DM access is unavailable for this connection. Contact your administrator to enable it."
+        )
     if account.messaging_access is False:
         return blocked("Grant messaging access on the linked Facebook Page, then reconnect this account.")
     scope = {

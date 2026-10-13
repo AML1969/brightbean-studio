@@ -23,6 +23,7 @@ from .meta_insights import fetch_insights_safe
 from .meta_messaging import (
     InstagramMessageBatch,
     build_send_payload,
+    enabled,
     fetch_instagram_page_messages,
     merge_page_message_subscription,
     meta_subscription_needs_reconnect,
@@ -152,6 +153,23 @@ class InstagramProvider(SocialProvider):
         ]
 
     @property
+    def dm_oauth_scopes_enabled(self) -> bool:
+        return enabled(self.credentials.get("dm_oauth_scopes_enabled"))
+
+    @property
+    def oauth_scopes(self) -> list[str]:
+        """Request messaging only when the deployment is ready for its approval.
+
+        Keep required_scopes complete: grant readback and existing DM access
+        must continue to depend on the token, not this OAuth rollout switch.
+        """
+        return [
+            scope
+            for scope in self.required_scopes
+            if scope != "instagram_manage_messages" or self.dm_oauth_scopes_enabled
+        ]
+
+    @property
     def rate_limits(self) -> RateLimitConfig:
         return RateLimitConfig(
             requests_per_hour=200,
@@ -169,7 +187,7 @@ class InstagramProvider(SocialProvider):
             client_id=self.credentials["client_id"],
             redirect_uri=redirect_uri,
             state=state,
-            scopes=self.required_scopes,
+            scopes=self.oauth_scopes,
             config_id=str(self.credentials.get("config_id") or "").strip(),
         )
         return f"{OAUTH_URL}?{urlencode(params)}"
@@ -772,10 +790,14 @@ class InstagramProvider(SocialProvider):
         page_id = self.credentials.get("page_id")
         if page_id:
             missing = set(self.credentials.get("missing_scopes", []))
-            if (
-                missing & {"instagram_manage_messages", "pages_manage_metadata"}
-                or self.credentials.get("messaging_access") is False
-            ):
+            if "pages_manage_metadata" in missing:
+                failures.append("DM notifications require Page metadata permissions. Reconnect Instagram.")
+                needs_reconnect = True
+            elif "instagram_manage_messages" in missing and not self.dm_oauth_scopes_enabled:
+                # The account cannot grant a permission we deliberately omit.
+                # Keep its comment subscription without prompting a reconnect.
+                pass
+            elif "instagram_manage_messages" in missing or self.credentials.get("messaging_access") is False:
                 failures.append(
                     "DM notifications require messaging permissions and Page messaging access. Reconnect Instagram."
                 )

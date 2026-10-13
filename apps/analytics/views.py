@@ -161,6 +161,9 @@ def analytics_account(request: HttpRequest, workspace_id, account_id) -> HttpRes
     from .models import AccountInsightsSnapshot
 
     has_snapshots = AccountInsightsSnapshot.objects.filter(social_account=account).exists()
+    youtube_bundle = services.account_analytics_bundle(account, days) if account.platform == "youtube" else None
+    if youtube_bundle is not None:
+        has_snapshots = has_snapshots or bool(youtube_bundle["native_current"])
     is_fresh = not has_any_post and not has_snapshots
     # Every gate comes from the one shared predicate, which also reports which
     # of them fired — only the admin-disabled one has a fix to offer (enable,
@@ -180,6 +183,7 @@ def analytics_account(request: HttpRequest, workspace_id, account_id) -> HttpRes
         "platform_name": services.platform_name(account),
         "content_noun": services.content_noun(account),
         "is_fresh": is_fresh,
+        "reporting_period": youtube_bundle["reporting_period"] if youtube_bundle is not None else None,
         # An unavailable platform gets its own reconnect instructions inside
         # the empty state, so suppressing the scope banner here keeps one set
         # of instructions on screen instead of two competing ones.
@@ -209,12 +213,14 @@ def analytics_account(request: HttpRequest, workspace_id, account_id) -> HttpRes
         return render(request, "analytics/index.html", context)
 
     if is_fresh:
+        if request.headers.get("HX-Request") and request.GET.get("partial") == "page":
+            return render(request, "analytics/_page.html", context)
         return render(request, "analytics/index.html", context)
 
     # Compute the bundle once and thread it into every consumer — the
     # post-level fallback inside the bundle is the dominant cost, and calling
     # these helpers without ``bundle`` re-runs it 3-4 times per render.
-    bundle = services.account_analytics_bundle(account, days)
+    bundle = youtube_bundle if youtube_bundle is not None else services.account_analytics_bundle(account, days)
     follower_g = services.follower_growth(account, days, bundle=bundle)
     hero_cards = services.hero_cards(account, days, bundle=bundle)
     engagement = services.engagement_card(account, days, bundle=bundle)
@@ -242,6 +248,7 @@ def analytics_account(request: HttpRequest, workspace_id, account_id) -> HttpRes
                 account, cards=hero_cards, engagement=engagement, chart=chart, growth=follower_g
             ),
             "chart": chart,
+            "reporting_period": bundle.get("reporting_period"),
             # ``null`` for days not reported yet: Chart.js draws those as a gap.
             "chart_series_json": json.dumps([None if v is None else round(v, 4) for v in chart["derived"].series]),
             "chart_labels_json": json.dumps(chart["labels"]),

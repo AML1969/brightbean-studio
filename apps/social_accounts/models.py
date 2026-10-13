@@ -3,13 +3,26 @@ from typing import Any
 
 from django.conf import settings
 from django.db import models, transaction
+from django.utils import timezone
 
 from apps.common.encryption import EncryptedTextField
 from apps.common.managers import WorkspaceScopedManager
 from apps.credentials.models import PlatformCredential
 
 
+class YouTubeRevocation(models.Model):
+    """Encrypted, short-lived grant retry, independent of a deleted account."""
+
+    token = EncryptedTextField()
+    created_at = models.DateTimeField(default=timezone.now)
+    expires_at = models.DateTimeField()
+    next_attempt_at = models.DateTimeField(default=timezone.now)
+    attempts = models.PositiveIntegerField(default=0)
+
+
 class SocialAccount(models.Model):
+    _skip_analytics_backfill: bool
+
     class AnalyticsStatus(models.TextChoices):
         UNKNOWN = "unknown", "Not checked"
         CHECKING = "checking", "Checking"
@@ -106,6 +119,17 @@ class SocialAccount(models.Model):
     last_error = models.TextField(blank=True, default="")
 
     connected_at = models.DateTimeField(auto_now_add=True)
+    youtube_authorized_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="authorized_youtube_accounts",
+    )
+    youtube_authorization_checked_at = models.DateTimeField(null=True, blank=True)
+    youtube_profile_refreshed_at = models.DateTimeField(null=True, blank=True)
+    youtube_verification_started_at = models.DateTimeField(default=timezone.now)
+    youtube_data_generation = models.PositiveIntegerField(default=0)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -288,7 +312,48 @@ class SocialAccount(models.Model):
 
         from django.utils import timezone
 
-        new_tokens = provider.refresh_token(self.oauth_refresh_token)
+        try:
+            new_tokens = provider.refresh_token(self.oauth_refresh_token)
+        except Exception as exc:
+            if self.platform == "youtube":
+                from .youtube_compliance import permanent_grant_rejection, purge_connection
+
+                if permanent_grant_rejection(exc):
+                    purge_connection(self, check_generation=True)
+            raise
+        if self.platform == "youtube":
+            with transaction.atomic():
+                current = (
+                    type(self)
+                    .objects.select_for_update()
+                    .filter(pk=self.pk, youtube_data_generation=self.youtube_data_generation)
+                    .first()
+                )
+                if current is None:
+                    from providers.exceptions import TokenExpiredError
+
+                    raise TokenExpiredError("YouTube connection changed during token refresh", platform="youtube")
+                current.oauth_access_token = new_tokens.access_token
+                if new_tokens.refresh_token:
+                    current.oauth_refresh_token = new_tokens.refresh_token
+                if new_tokens.expires_in:
+                    current.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
+                current.connection_status = self.ConnectionStatus.CONNECTED
+                current._skip_analytics_backfill = not enqueue_backfill
+                current.save(
+                    update_fields=[
+                        "oauth_access_token",
+                        "oauth_refresh_token",
+                        "token_expires_at",
+                        "connection_status",
+                        "updated_at",
+                    ]
+                )
+                self.oauth_access_token = current.oauth_access_token
+                self.oauth_refresh_token = current.oauth_refresh_token
+                self.token_expires_at = current.token_expires_at
+                self.connection_status = current.connection_status
+                return current.oauth_access_token
         self.oauth_access_token = new_tokens.access_token
         if new_tokens.refresh_token:
             self.oauth_refresh_token = new_tokens.refresh_token

@@ -150,7 +150,7 @@ def _post_summed_series_for_metric(
 
     Returns ``(daily_totals, max_captured_at, observed_days)``. The caller
     folds ``max_captured_at`` into the bundle's freshness signal so a
-    fallback-only YouTube/TikTok response doesn't report "no data yet".
+    fallback-only TikTok response doesn't report "no data yet".
     ``observed_days`` are the days we actually measured, including days
     whose delta was zero (which ``daily_totals`` leaves out): a quiet day is
     a real 0, while a day with no snapshot yet is missing, and the averages
@@ -179,6 +179,8 @@ def _post_summed_series_for_metric(
         recovery is measured against the pre-reset high-water mark instead
         of being over-credited.
     """
+    if account.platform == "youtube":
+        return {}, None, set()
     rows = (
         PostInsightsSnapshot.objects.filter(
             platform_post__social_account=account,
@@ -261,6 +263,10 @@ def account_analytics_bundle(account: SocialAccount, days: int) -> dict[str, Any
     with a single bulk SELECT, and exposes the freshness max so callers
     don't need a separate ``Max("captured_at")`` aggregate.
     """
+    if account.platform == "youtube":
+        from .youtube_reports import account_bundle
+
+        return account_bundle(account, days)
     end = timezone.now().date()
     start = end - timedelta(days=2 * days - 1)
     platform_metrics = PLATFORM_METRICS.get(account.platform, [])
@@ -292,7 +298,8 @@ def account_analytics_bundle(account: SocialAccount, days: int) -> dict[str, Any
 
     # Hybrid fallback: for content-attribution metrics, derive a daily series
     # by summing per-post deltas so platforms without ``get_account_metrics``
-    # (YouTube, TikTok, etc.) still get populated hero cards and charts.
+    # (TikTok, etc.) still get populated hero cards and charts. YouTube returns
+    # above, so neither reconstruction nor the freshness fallback applies.
     #
     # Also prefer the per-post series when it is fresher than account-level
     # rows. Facebook account insights are synced at most daily, while per-post
@@ -331,6 +338,10 @@ def account_analytics_bundle(account: SocialAccount, days: int) -> dict[str, Any
 def _derive_metric(bundle: dict[str, Any], metric: str, days: int) -> DerivedMetric:
     """:func:`derive` one metric from the bundle, carrying the presence mask
     and the per-post-estimate flag the cards label."""
+    if "native_current" in bundle:
+        from .youtube_reports import native_metric
+
+        return native_metric(bundle, metric, days)
     return derive(
         bundle["series_map"].get(metric, []),
         days,
@@ -408,10 +419,7 @@ def engagement_card(
     rate.estimated = any(p["derived"].estimated for p in parts) or rate.denominator in bundle["estimated_metrics"]
     formula = None
     if rate.denominator is not None:
-        if rate.denominator == "followers":
-            denominator_label = "Subscribers" if account.platform == "youtube" else "Followers"
-        else:
-            denominator_label = _label(rate.denominator)
+        denominator_label = "Followers" if rate.denominator == "followers" else _label(rate.denominator)
         numerator = " + ".join(p["label"] for p in parts)
         formula = f"({numerator}) ÷ {denominator_label}" if len(parts) > 1 else f"{numerator} ÷ {denominator_label}"
     return {"rate": rate, "parts": parts, "formula": formula}
@@ -427,11 +435,11 @@ def calculated_metrics_note(
 ) -> str:
     """One line under the KPI row naming what on the page we calculated.
 
-    YouTube's developer policies let us show metrics we derive from API data
-    only if they are clearly labelled as ours, not the platform's. The cards
-    carry their own labels; this line also covers the % change chips, which
-    appear on every card and have no room for one.
+    Describe native reports and any permitted calculations accurately.
+    A disclosure label does not authorize a derived metric.
     """
+    if account.platform == "youtube":
+        return "Metrics reported by YouTube. Data may be delayed. Percentage comparisons, when available, are calculated from reported totals."
     shown = [card["derived"] for card in cards]
     if engagement:
         shown += [part["derived"] for part in engagement["parts"]]
@@ -475,6 +483,10 @@ def hero_chart_data(
     chips = hero_chart_metrics(account)
     selected = metric if metric in chips else (PLATFORM_PRIMARY.get(account.platform) or (chips[0] if chips else ""))
     end = timezone.now().date()
+    if account.platform == "youtube":
+        from .youtube_reports import reporting_window
+
+        _, end = reporting_window(days)
     if bundle is None:
         bundle = account_analytics_bundle(account, days)
     derived = _derive_metric(bundle, selected, days)
@@ -582,7 +594,8 @@ def follower_growth_metric(
         )
     if bundle is None:
         bundle = account_analytics_bundle(account, days)
-    return growth_metric, _derive_metric(bundle, growth_metric, days)
+    metric = _derive_metric(bundle, growth_metric, days)
+    return (growth_metric, metric) if metric.available else None
 
 
 def all_posts_for(
@@ -698,7 +711,7 @@ def post_detail(post: PlatformPost) -> dict[str, Any]:
             {
                 "key": m,
                 "label": _label(m),
-                "value": stats.get(m, 0),
+                "value": stats.get(m) if account.platform == "youtube" else stats.get(m, 0),
                 "kind": kind_of(m),
                 "sparkline": sparklines_by_metric.get(m, []),
                 "is_primary": m == PLATFORM_PRIMARY.get(account.platform),

@@ -1055,7 +1055,9 @@ class TestDisconnectView:
         assert response.status_code == 302
         assert SocialAccount.objects.filter(pk=account.pk).count() == 0
 
-    def test_youtube_revokes_the_grant_with_the_refresh_token(self, authenticated_client, workspace):
+    def test_youtube_revokes_the_grant_with_the_refresh_token(
+        self, authenticated_client, workspace, django_capture_on_commit_callbacks
+    ):
         """Google refuses an expired access token, and ours lives an hour, so
         revoking with it would usually leave the grant live."""
         account = SocialAccount.objects.create(
@@ -1073,6 +1075,7 @@ class TestDisconnectView:
         with (
             patch("apps.social_accounts.views.unsubscribe_account_webhooks"),
             patch("providers.get_provider") as mock,
+            django_capture_on_commit_callbacks(execute=True),
         ):
             response = authenticated_client.post(url)
 
@@ -1158,8 +1161,8 @@ class TestDisconnectConfirmation:
 
         assert "Disconnect <strong>Test Channel</strong>?" in text
         assert "This revokes BrightBean's access to the account." in text
-        assert "Its analytics, inbox messages and posts made only for it are deleted from BrightBean." in text
-        assert "Posts shared with other channels stay." in text
+        assert "YouTube data, analytics and copied comments are deleted immediately" in text
+        assert "original uploads and posts shared with other channels stay" in text
         assert "Historical data will be preserved" not in text
         assert "removes the account from BrightBean only" not in text
 

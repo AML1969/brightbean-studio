@@ -140,7 +140,7 @@ def resolve_platform_credentials(platform, org_id):
             credentials = dict(env_creds)
     if platform == "instagram" and credentials:
         # This deployment switch applies to every OAuth entry point, including
-        # org-owned apps. A stored credential cannot enable unapproved scopes.
+        # org-owned apps. Stored credentials cannot override an operator's opt-out.
         credentials["dm_oauth_scopes_enabled"] = settings.PLATFORM_INSTAGRAM_FACEBOOK_DM_SCOPES_ENABLED
     return credentials
 

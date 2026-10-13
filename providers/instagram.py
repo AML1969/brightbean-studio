@@ -154,14 +154,14 @@ class InstagramProvider(SocialProvider):
 
     @property
     def dm_oauth_scopes_enabled(self) -> bool:
-        return enabled(self.credentials.get("dm_oauth_scopes_enabled"))
+        return enabled(self.credentials.get("dm_oauth_scopes_enabled", True))
 
     @property
     def oauth_scopes(self) -> list[str]:
-        """Request messaging only when the deployment is ready for its approval.
+        """Request messaging by default unless the deployment opts out.
 
         Keep required_scopes complete: grant readback and existing DM access
-        must continue to depend on the token, not this OAuth rollout switch.
+        must continue to depend on the token, not this permission-request setting.
         """
         return [
             scope

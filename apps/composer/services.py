@@ -312,6 +312,7 @@ def clone_post(post, *, author=None):
     from django.db import transaction
 
     from apps.composer.models import PlatformPost, Post, PostMedia
+    from apps.social_accounts.youtube_compliance import authored_youtube_settings
 
     with transaction.atomic():
         new_post = Post.objects.create(
@@ -336,7 +337,11 @@ def clone_post(post, *, author=None):
                         platform_specific_caption=pp.platform_specific_caption,
                         platform_specific_first_comment=pp.platform_specific_first_comment,
                         platform_specific_media=copy.deepcopy(pp.platform_specific_media),
-                        platform_extra=copy.deepcopy(pp.platform_extra) if pp.platform_extra else {},
+                        platform_extra=copy.deepcopy(
+                            authored_youtube_settings(pp.platform_extra)
+                            if pp.social_account.platform == "youtube"
+                            else pp.platform_extra or {}
+                        ),
                     )
                     for pp in children
                 ]

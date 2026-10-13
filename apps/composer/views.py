@@ -452,6 +452,8 @@ def _validate_required_media(request, post, workspace, action):
 
 def _save_version(post, user):
     """Create a PostVersion snapshot."""
+    from apps.social_accounts.youtube_compliance import authored_youtube_settings
+
     version_number = (post.versions.count()) + 1
     snapshot = {
         "title": post.title,
@@ -468,7 +470,9 @@ def _save_version(post, user):
                 "title_override": pp.platform_specific_title,
                 "caption_override": pp.platform_specific_caption,
                 "first_comment_override": pp.platform_specific_first_comment,
-                "platform_extra": pp.platform_extra or {},
+                "platform_extra": authored_youtube_settings(pp.platform_extra)
+                if pp.social_account.platform == "youtube"
+                else pp.platform_extra or {},
             }
             for pp in post.platform_posts.select_related("social_account")
         ],
@@ -672,6 +676,9 @@ def compose(request, workspace_id, post_id=None):
             # so the live counter can charge for them as the user types.
             "escaped_chars": acc.escaped_chars,
             "name": acc.account_name or acc.account_handle,
+            "youtube_url": f"https://www.youtube.com/channel/{acc.account_platform_id}"
+            if acc.platform == "youtube"
+            else "",
             **cfg,
         }
 

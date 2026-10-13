@@ -37,6 +37,14 @@ def check_social_account_health(account_id: str):
         logger.warning("Health check: account %s not found, skipping", account_id)
         return
 
+    if account.platform == "youtube":
+        from django.conf import settings
+
+        from .youtube_compliance import check_connection
+
+        check_connection(account, enforce=settings.YOUTUBE_COMPLIANCE_ENFORCEMENT)
+        return
+
     # Resolve per-account credentials via the shared resolver: org/.env app creds
     # plus per-account federation metadata (Mastodon instance_url behind an SSRF
     # check, Bluesky pds_url, Instagram ig_user_id). Shared with the publish engine

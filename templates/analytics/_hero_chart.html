@@ -7,8 +7,8 @@
                 {% if chart.derived.estimated %}<span class="a-calc-tag" title="Estimated by BrightBean from per-{{ content_noun }} counts">Estimated by BrightBean</span>{% endif %}
             </div>
             <div style="display: flex; align-items: center; gap: 12px;">
-                <span style="font-size: 2.25rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); line-height: 1;">{{ chart.derived.value|fmt_metric:chart.derived.kind }}</span>
-                {% include "analytics/_delta_chip.html" with delta=chart.derived.delta large=True %}
+                <span style="font-size: 2.25rem; font-weight: 700; letter-spacing: -0.02em; color: var(--text-primary); line-height: 1;">{% if chart.derived.available %}{{ chart.derived.value|fmt_metric:chart.derived.kind }}{% else %}—{% endif %}</span>
+                {% if chart.derived.comparison_available %}{% include "analytics/_delta_chip.html" with delta=chart.derived.delta large=True %}{% endif %}
             </div>
         </div>
         <div style="display: flex; flex-wrap: wrap; gap: 6px;">
@@ -26,6 +26,7 @@
         <canvas id="analytics-area-chart"
                 data-series="{{ chart_series_json }}"
                 data-labels="{{ chart_labels_json }}"
+                data-platform="{{ active_account.platform }}"
                 style="position: absolute; inset: 0;"></canvas>
     </div>
 </div>

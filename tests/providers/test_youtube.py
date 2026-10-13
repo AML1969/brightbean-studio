@@ -88,13 +88,17 @@ class TestGetPostAnalytics:
         assert set(result.keys()) == {"abc123", "def456"}
         # watch_time and avg_view_pct flow through ``extra`` (the catalog
         # mapper reads them from _GENERIC_POST_EXTRA_KEYS).
-        assert result["abc123"].extra == {"watch_time": 1500.0, "avg_view_pct": 47.5}
+        assert result["abc123"].extra == {
+            "watch_time": 1500.0,
+            "avg_view_pct": 47.5,
+            "reported_metrics": {"shares": 12},
+        }
         # shares lives on the PostMetrics dataclass field — that's where
         # ``_post_metrics_to_dict`` looks for it.
         assert result["abc123"].shares == 12
         # Real zero is preserved on extras, not dropped — same semantics
         # as the closure in get_account_metrics.
-        assert result["def456"].extra == {"watch_time": 0.0, "avg_view_pct": 0.0}
+        assert result["def456"].extra == {"watch_time": 0.0, "avg_view_pct": 0.0, "reported_metrics": {"shares": 0}}
         assert result["def456"].shares == 0
 
     @patch.object(YouTubeProvider, "_request")

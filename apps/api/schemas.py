@@ -483,7 +483,8 @@ class DerivedMetricResponse(Schema):
         ...,
         description=(
             "Aggregate value over the current window. Sum for ``count`` metrics, "
-            "average of the days with data for ``percent`` and ``minutes`` (since those are already daily rates)."
+            "YouTube uses the native whole-period report for every metric, including watch-time totals "
+            "and averageViewPercentage. Other platforms may average daily percent/minute values."
         ),
     )
     delta: float = Field(
@@ -504,8 +505,8 @@ class DerivedMetricResponse(Schema):
         False,
         description=(
             "``true`` when BrightBean calculated ``value`` rather than the platform reporting it: the "
-            "engagement rate, daily averages, and estimates. YouTube's developer policies require such "
-            "metrics to be labelled as calculated by BrightBean, not by the platform, wherever they are shown."
+            "engagement rate, daily averages, and estimates on supported platforms. "
+            "Disclosure does not permit prohibited derived metrics. YouTube values are native reports."
         ),
     )
     averaged: bool = Field(False, description="``value`` is BrightBean's average of the platform's daily figures.")
@@ -517,6 +518,7 @@ class DerivedMetricResponse(Schema):
             "follower totals."
         ),
     )
+    comparison_available: bool = Field(True, description="Whether delta has a complete, nonzero comparison baseline.")
 
     @classmethod
     def from_derived(
@@ -534,6 +536,7 @@ class DerivedMetricResponse(Schema):
             calculated_by_brightbean=calculated or derived.averaged or derived.estimated,
             averaged=derived.averaged,
             estimated=derived.estimated,
+            comparison_available=derived.comparison_available,
         )
 
 
@@ -558,6 +561,13 @@ class EngagementCardResponse(Schema):
     )
 
 
+class ReportingPeriodResponse(Schema):
+    start: dt.date
+    end: dt.date
+    timezone: str
+    latest_reported_day: dt.date | None = None
+
+
 class AccountAnalyticsResponse(Schema):
     """Channel-level analytics summary over a rolling window of days."""
 
@@ -572,6 +582,7 @@ class AccountAnalyticsResponse(Schema):
         ),
     )
     days: int = Field(..., description="Window size (in days) used for derivation. One of 7, 30, or 90.")
+    reporting_period: ReportingPeriodResponse | None = None
     analytics_available: bool = Field(
         ...,
         description=(
@@ -585,7 +596,7 @@ class AccountAnalyticsResponse(Schema):
     )
     hero_metrics: list[DerivedMetricResponse] = Field(
         default_factory=list,
-        description="Top-line per-channel KPIs (reach-like counts). Engagement parts are in ``engagement.parts``.",
+        description="Top-line per-channel KPIs. YouTube includes separate likes, comments and shares here.",
     )
     engagement: EngagementCardResponse | None = Field(
         None,

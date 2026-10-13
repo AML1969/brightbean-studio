@@ -27,15 +27,15 @@ class DerivedMetric:
     # reported value yet (see ``_reported_days``), which charts draw as a gap.
     series: list[float | None]
     kind: str  # "count" | "percent" | "minutes"
-    # How BrightBean produced ``value`` when the platform didn't report it as
-    # shown. YouTube's developer policies allow metrics derived from API data
-    # only when they are labelled as ours, so every card and the agent API key
-    # their "calculated by BrightBean" labels off these fields.
+    # Provenance labels describe a calculation; they do not grant permission
+    # to create metrics prohibited by a platform's developer policies.
     averaged: bool = False  # our average of the platform's daily figures
     estimated: bool = False  # built from other counts (per-post deltas, follower totals)
     # Ratios only: the metric key the value divides by ("followers" for the
     # follower-count fallback), or ``None`` when there was nothing to divide by.
     denominator: str | None = None
+    available: bool = True
+    comparison_available: bool = True
 
 
 def calculate_engagement_rate(engagements: float, views: float | None = None, reach: float | None = None) -> float:

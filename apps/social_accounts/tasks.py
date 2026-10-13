@@ -21,6 +21,16 @@ EXPIRY_BOOTSTRAP_PLATFORMS = ("bluesky", "threads")
 
 @background(schedule=0)
 def check_social_account_health(account_id: str):
+    """Maintain account health without scheduling historical analytics work."""
+    from apps.analytics.signals import suppress_analytics_backfills
+
+    # Some platform-specific checks reload the account before saving tokens.
+    # An instance flag alone does not cover those saves; a scoped guard does.
+    with suppress_analytics_backfills():
+        _check_social_account_health(account_id)
+
+
+def _check_social_account_health(account_id: str):
     """Check health of a single social account.
 
     Validates the OAuth token by calling get_profile(). If the token

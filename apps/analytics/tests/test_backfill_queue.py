@@ -1,5 +1,6 @@
 """Routine token maintenance must not create historical analytics backlogs."""
 
+import threading
 from datetime import timedelta
 from unittest.mock import Mock, patch
 
@@ -8,7 +9,9 @@ from background_task.models import Task
 from django.test import TestCase
 from django.utils import timezone
 
+from apps.analytics.signals import suppress_analytics_backfills
 from apps.analytics.tasks import backfill_account_analytics, deduplicate_pending_backfills
+from apps.common.db import in_worker_thread
 from apps.publisher.engine import _provider_and_access_token
 from apps.social_accounts.models import SocialAccount
 from apps.social_accounts.tasks import check_social_account_health
@@ -24,7 +27,9 @@ def account(organization):
     workspace = Workspace.objects.create(organization=organization, name="Backfill Queue")
     account = SocialAccount.objects.create(
         workspace=workspace,
-        platform="youtube",
+        # Exercise generic maintenance. YouTube has a separate verification
+        # health-check path, covered by its compliance tests.
+        platform="linkedin_personal",
         account_platform_id="queue-account",
         account_name="Queue Account",
         oauth_access_token="old-token",
@@ -85,6 +90,53 @@ def test_publish_token_refresh_does_not_queue_backfill(account, provider):
         _, token = _provider_and_access_token(account)
     assert token == "fresh-token"
     assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 0
+
+
+def test_health_suppression_covers_reloaded_instances_and_resets_afterwards(account, provider):
+    account.token_expires_at = timezone.now() + timedelta(days=30)
+    account.save(update_fields=["token_expires_at"])
+
+    def profile(token):
+        fresh = SocialAccount.objects.get(pk=account.pk)
+        fresh.oauth_access_token = "fresh-instance-token"
+        fresh.save(update_fields=["oauth_access_token"])
+        return AccountProfile(
+            platform_id="queue-account", name="Queue Account", handle="queue-account", follower_count=5
+        )
+
+    provider.get_profile.side_effect = profile
+    with patch("providers.get_provider", return_value=provider):
+        check_social_account_health.now(str(account.pk))
+    assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 0
+    # Outside the maintenance context, a genuine reconnect still queues work.
+    account.refresh_from_db()
+    account.oauth_access_token = "reconnected"
+    account.save(update_fields=["oauth_access_token"])
+    assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 1
+
+
+@pytest.mark.django_db(transaction=True)
+def test_maintenance_suppression_does_not_hide_a_concurrent_genuine_reconnect(account):
+    errors = []
+
+    def reconnect():
+        try:
+            fresh = SocialAccount.objects.get(pk=account.pk)
+            fresh.oauth_access_token = "concurrent-reconnect"
+            fresh.save(update_fields=["oauth_access_token"])
+        except Exception as exc:
+            errors.append(exc)
+
+    with suppress_analytics_backfills():
+        account.oauth_access_token = "maintenance-token"
+        account.save(update_fields=["oauth_access_token"])
+        assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 0
+        thread = threading.Thread(target=in_worker_thread, args=(reconnect,))
+        thread.start()
+        thread.join(5)
+        assert not thread.is_alive()
+    assert not errors
+    assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 1
 
 
 @pytest.mark.parametrize("platform", ["youtube", "instagram"])

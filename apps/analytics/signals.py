@@ -5,6 +5,10 @@ switches a platform on in :class:`AnalyticsPlatformConfig`.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+
 from django.db import transaction
 from django.db.models.signals import post_save, pre_save
 from django.dispatch import receiver
@@ -17,6 +21,21 @@ from apps.social_accounts.models import AnalyticsPlatformConfig, SocialAccount
 # lives here rather than in the admin so it also covers ``save()`` from a shell,
 # ``update_or_create``, and any other code path that writes the row.
 BACKFILL_QUEUED_ATTR = "analytics_backfill_queued"
+_backfills_suppressed: ContextVar[bool] = ContextVar("analytics_backfills_suppressed", default=False)
+
+
+@contextmanager
+def suppress_analytics_backfills() -> Iterator[None]:
+    """Suppress routine-maintenance signals, including freshly loaded instances.
+
+    Scoped to the current execution context, so a concurrent genuine reconnect
+    on the other worker thread still queues its historical analytics fetch.
+    """
+    token = _backfills_suppressed.set(True)
+    try:
+        yield
+    finally:
+        _backfills_suppressed.reset(token)
 
 
 @receiver(post_save, sender=SocialAccount)
@@ -29,7 +48,7 @@ def enqueue_analytics_backfill(sender, instance: SocialAccount, created: bool, u
     # Only act on real OAuth-token changes or first connect — anything else
     # (avatar refresh, follower count update) would re-trigger the backfill
     # noisily.
-    if getattr(instance, "_skip_analytics_backfill", False):
+    if _backfills_suppressed.get() or getattr(instance, "_skip_analytics_backfill", False):
         return
     if not created:
         if update_fields is None and not getattr(instance, "_analytics_credentials_changed", False):

@@ -261,8 +261,7 @@ class TestAccountAnalytics:
         assert body["follower_growth"]["key"] == "followers"
 
     def test_marks_what_brightbean_calculated(self, client_with_token, instagram_account):
-        """YouTube's policies require derived metrics to be labelled as ours
-        wherever they're shown, and agents render this payload to users."""
+        """Agents can identify permitted calculations on supported platforms."""
         _seed_account_snapshots(instagram_account, days=30)
         body = client_with_token.get(f"/api/v1/analytics/accounts/{instagram_account.id}?days=30").json()
 

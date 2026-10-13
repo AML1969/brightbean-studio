@@ -336,6 +336,63 @@ def _provider(*, batch_size=1):
 
 
 @pytest.mark.django_db
+class TestYouTubePostGeneration:
+    @pytest.mark.parametrize("path", ["analytics", "batch", "individual", "single"])
+    @pytest.mark.parametrize("renew_during_request", [False, True])
+    def test_response_uses_the_generation_of_its_grant(self, workspace, path, renew_during_request):
+        from apps.analytics.models import PostInsightsSnapshot
+        from apps.analytics.tasks import _sync_account_posts, _sync_post_metrics, _sync_youtube_post_analytics
+        from apps.composer.models import PlatformPost
+        from providers.types import PostMetrics
+
+        account = _youtube_account(workspace, platform_id="yt-generation", needs_reconnect=False)
+        created = _published_post(account)
+        # The account loop fetches posts without caching their SocialAccount.
+        post = PlatformPost.objects.get(pk=created.pk)
+        today = timezone.now().date()
+        provider = _provider(batch_size=50 if path == "batch" else 1)
+        metrics = PostMetrics(video_views=5, extra={"watch_time": 42, "avg_view_pct": 72.4})
+
+        def fetched(*args, **kwargs):
+            if renew_during_request:
+                SocialAccount.objects.filter(pk=account.pk).update(
+                    youtube_data_generation=account.youtube_data_generation + 1,
+                    oauth_access_token="renewed-token",
+                )
+                # Simulate newer snapshots arriving before the old request returns.
+                for key in ("views", "watch_time"):
+                    PostInsightsSnapshot.objects.create(platform_post=post, metric_key=key, date=today, value=900)
+            if path in {"analytics", "batch"}:
+                return {post.platform_post_id: metrics}
+            return metrics
+
+        if path == "analytics":
+            provider.get_post_analytics.side_effect = fetched
+            _sync_youtube_post_analytics(account, provider, "old-token", today)
+        elif path == "single":
+            provider.get_post_metrics.side_effect = fetched
+            _sync_post_metrics(post, today, provider=provider, access_token="old-token")
+        else:
+            if path == "batch":
+                provider.get_post_metrics_batch.side_effect = fetched
+            else:
+                provider.get_post_metrics.side_effect = fetched
+            _sync_account_posts(account, provider, "old-token", [post], today)
+
+        actual = dict(PostInsightsSnapshot.objects.filter(platform_post=post).values_list("metric_key", "value"))
+        expected = (
+            {"views": 900.0, "watch_time": 900.0}
+            if renew_during_request
+            else {
+                "views": 5.0,
+                "watch_time": 42.0,
+                "avg_view_pct": 72.4,
+            }
+        )
+        assert actual == expected
+
+
+@pytest.mark.django_db
 class TestFailureBackoff:
     """Regression cover for the YouTube quota storm.
 
@@ -618,7 +675,7 @@ class TestQuotaBreaker:
         account = _youtube_account(workspace, platform_id="yt-1", needs_reconnect=False)
         provider = _provider(batch_size=1)
         provider.account_metrics_supports_date_range = True
-        provider.get_account_metrics.side_effect = QuotaExceededError("spent", quota_scope="analytics")
+        provider.get_channel_daily_metrics.side_effect = QuotaExceededError("spent", quota_scope="analytics")
 
         with patch("apps.analytics.tasks._analytics_provider_and_token", return_value=(provider, "tok")):
             _sync_one_account(account, timezone.now().date(), timezone.now(), cache={})
@@ -639,7 +696,7 @@ class TestQuotaBreaker:
         _published_post(account)
         provider = _provider(batch_size=50)
         provider.account_metrics_supports_date_range = True
-        provider.get_account_metrics.side_effect = QuotaExceededError("spent", quota_scope="analytics")
+        provider.get_channel_daily_metrics.side_effect = QuotaExceededError("spent", quota_scope="analytics")
         provider.get_post_metrics_batch.return_value = {}
 
         with patch("apps.analytics.tasks._analytics_provider_and_token", return_value=(provider, "tok")):

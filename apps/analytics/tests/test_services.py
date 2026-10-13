@@ -267,7 +267,7 @@ def _bundle(series_map, *, estimated=()):
 def test_engagement_formula_names_the_denominator_the_rate_used():
     from apps.analytics.services import engagement_card
 
-    account = SocialAccount(platform="youtube", follower_count=200)
+    account = SocialAccount(platform="tiktok", follower_count=200)
     series = {"views": [100.0], "likes": [8.0], "comments": [2.0], "shares": [1.0]}
 
     card = engagement_card(account, 1, bundle=_bundle(series))
@@ -275,7 +275,7 @@ def test_engagement_formula_names_the_denominator_the_rate_used():
     assert card["formula"] == "(Likes + Comments + Shares) ÷ Views"
 
 
-def test_engagement_formula_on_the_follower_fallback_says_subscribers_on_youtube():
+def test_youtube_has_no_engagement_card_even_with_a_subscriber_fallback():
     from apps.analytics.services import engagement_card
 
     series = {"views": [0.0], "likes": [8.0], "comments": [2.0], "shares": [1.0]}
@@ -283,7 +283,7 @@ def test_engagement_formula_on_the_follower_fallback_says_subscribers_on_youtube
     youtube = engagement_card(SocialAccount(platform="youtube", follower_count=200), 1, bundle=_bundle(series))
     tiktok = engagement_card(SocialAccount(platform="tiktok", follower_count=200), 1, bundle=_bundle(series))
 
-    assert youtube["formula"] == "(Likes + Comments + Shares) ÷ Subscribers"
+    assert youtube is None
     assert tiktok["formula"] == "(Likes + Comments + Shares) ÷ Followers"
 
 
@@ -292,7 +292,7 @@ def test_engagement_formula_is_none_when_there_is_nothing_to_divide_by():
 
     series = {"views": [0.0], "likes": [8.0], "comments": [2.0], "shares": [1.0]}
 
-    card = engagement_card(SocialAccount(platform="youtube", follower_count=0), 1, bundle=_bundle(series))
+    card = engagement_card(SocialAccount(platform="tiktok", follower_count=0), 1, bundle=_bundle(series))
 
     assert card["formula"] is None
     assert card["rate"].value == 0.0
@@ -315,7 +315,7 @@ def test_engagement_rate_built_from_estimated_parts_is_marked_estimated():
 
     series = {"views": [100.0], "likes": [8.0], "comments": [2.0], "shares": [1.0]}
 
-    card = engagement_card(SocialAccount(platform="youtube"), 1, bundle=_bundle(series, estimated={"likes"}))
+    card = engagement_card(SocialAccount(platform="tiktok"), 1, bundle=_bundle(series, estimated={"likes"}))
 
     assert card["rate"].estimated is True
     assert [p["derived"].estimated for p in card["parts"]] == [True, False, False]

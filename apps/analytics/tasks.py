@@ -226,6 +226,20 @@ def _post_metrics_to_dict(metrics, platform: str) -> dict[str, float]:
             out[key] = float(v)
 
     extra = getattr(metrics, "extra", {}) or {}
+    if platform == "youtube":
+        # Reported zero is different from an absent Data/Analytics API field.
+        native = dict(extra.get("reported_metrics", {}))
+        if "reported_metrics" not in extra:
+            for source, key in (("video_views", "views"), ("likes", "likes"), ("comments", "comments")):
+                value = getattr(metrics, source, 0)
+                if value:
+                    native[key] = float(value)
+        if getattr(metrics, "shares", 0):
+            native["shares"] = float(metrics.shares)
+        for key in ("watch_time", "avg_view_pct", "shares"):
+            if key in extra:
+                native[key] = float(extra[key])
+        return native
     # Generic extras that match the catalog key exactly.
     for key in _GENERIC_POST_EXTRA_KEYS:
         v = extra.get(key)
@@ -360,6 +374,12 @@ def _analytics_provider_and_token(account) -> tuple:
     try:
         access_token = account.refresh_oauth_token(provider, enqueue_backfill=False)
     except Exception as exc:
+        if account.platform == "youtube":
+            from apps.social_accounts.youtube_compliance import permanent_grant_rejection, purge_connection
+
+            if permanent_grant_rejection(exc):
+                purge_connection(account, check_generation=True)
+                raise TokenExpiredError("YouTube authorization was permanently rejected", platform="youtube") from exc
         if _is_dead_grant(exc):
             logger.warning("analytics: OAuth grant for %s is gone (%s); flagging for reconnect", account, exc)
             _mark_needs_reconnect(account)
@@ -487,8 +507,41 @@ def _write_post_snapshot(
     *,
     raw: dict | None = None,
     errors: dict | None = None,
+    youtube_generation: int | None = None,
 ) -> int:
     from .models import PostInsightsSnapshot
+
+    if post.social_account.platform == "youtube":
+        from django.db import transaction
+
+        from apps.social_accounts.models import SocialAccount
+
+        # The expected generation belongs to the grant used for the request.
+        # A lazy SocialAccount lookup after HTTP can see a renewed connection.
+        if youtube_generation is None:
+            return 0
+        with transaction.atomic():
+            if (
+                not SocialAccount.objects.select_for_update()
+                .filter(
+                    pk=post.social_account_id,
+                    youtube_data_generation=youtube_generation,
+                )
+                .exists()
+            ):
+                return 0
+            if not type(post).objects.filter(pk=post.pk).exists():
+                return 0
+            count = 0
+            for key, value in metric_values.items():
+                PostInsightsSnapshot.objects.update_or_create(
+                    platform_post=post,
+                    metric_key=key,
+                    date=on_date,
+                    defaults={"value": value, "raw": raw or {}, "errors": errors or {}},
+                )
+                count += 1
+            return count
 
     if not metric_values:
         return 0
@@ -587,6 +640,18 @@ def _sync_account_metrics(
 
     if provider is None or access_token is None:
         provider, access_token = _analytics_provider_and_token(account)
+    if account.platform == "youtube":
+        from .youtube_reports import sync_channel_reports
+
+        try:
+            sync_channel_reports(account, provider, access_token, force=force_today)
+        except (QuotaExceededError, TokenExpiredError):
+            raise
+        except Exception as exc:
+            _record_analytics_error(account, exc, provider)
+            logger.warning("YouTube channel report failed for %s (%s)", account.pk, type(exc).__name__)
+        _sync_youtube_post_analytics(account, provider, access_token, on_date, deadline=deadline)
+        return
     tz = timezone.get_current_timezone()
     # Providers whose stats endpoint returns only lifetime totals (TikTok)
     # must NOT have those totals written into past dates as if they were
@@ -677,6 +742,7 @@ def _sync_youtube_post_analytics(
 
     from apps.composer.models import PlatformPost
 
+    youtube_generation = account.youtube_data_generation
     post_ids = list(
         PlatformPost.objects.filter(
             social_account=account,
@@ -752,6 +818,7 @@ def _sync_youtube_post_analytics(
             on_date,
             raw=extra.get("raw_insights", extra),
             errors=extra.get("insight_errors", {}),
+            youtube_generation=youtube_generation,
         )
 
     if retry_attempt:
@@ -857,6 +924,7 @@ def _sync_post_metrics(post, on_date: dt_date, *, provider=None, access_token: s
         return
     if provider is None or access_token is None:
         provider, access_token = _analytics_provider_and_token(account)
+    youtube_generation = account.youtube_data_generation if account.platform == "youtube" else None
     try:
         metrics = provider.get_post_metrics(access_token, post.platform_post_id)
     except NotImplementedError:
@@ -869,11 +937,13 @@ def _sync_post_metrics(post, on_date: dt_date, *, provider=None, access_token: s
         _record_post_sync_failure([post.pk])
         return
     _record_instagram_success(account)
-    _write_post_metrics_snapshot(post, metrics, account.platform, on_date)
+    _write_post_metrics_snapshot(post, metrics, account.platform, on_date, youtube_generation=youtube_generation)
     _record_post_sync_success([post.pk])
 
 
-def _write_post_metrics_snapshot(post, metrics, platform: str, on_date: dt_date) -> None:
+def _write_post_metrics_snapshot(
+    post, metrics, platform: str, on_date: dt_date, *, youtube_generation: int | None = None
+) -> None:
     """Write today's snapshot rows for one post's fetched metrics."""
     extra = getattr(metrics, "extra", {}) or {}
     _write_post_snapshot(
@@ -887,6 +957,7 @@ def _write_post_metrics_snapshot(post, metrics, platform: str, on_date: dt_date)
             "attempted_insight_post_ids": extra.get("attempted_insight_post_ids", []),
         },
         errors=extra.get("insight_errors", {}),
+        youtube_generation=youtube_generation,
     )
 
 
@@ -928,6 +999,7 @@ def _sync_account_posts(
             deadline=deadline,
         )
 
+    youtube_generation = account.youtube_data_generation if account.platform == "youtube" else None
     synced = failed = api_calls = 0
     first_error = None
     for offset in range(0, len(posts), batch_size):
@@ -981,7 +1053,9 @@ def _sync_account_posts(
                     # ours. Never write zeros — that would flatten real history.
                     miss_ids.append(post.pk)
                     continue
-                _write_post_metrics_snapshot(post, metrics, account.platform, on_date)
+                _write_post_metrics_snapshot(
+                    post, metrics, account.platform, on_date, youtube_generation=youtube_generation
+                )
                 hit_ids.append(post.pk)
 
             _record_post_sync_success(hit_ids, attempted_at)
@@ -1016,6 +1090,7 @@ def _sync_account_posts_individually(
     this path still exists — but an account-wide verdict still propagates, so a
     dead token doesn't quietly burn the whole channel one request at a time.
     """
+    youtube_generation = account.youtube_data_generation if account.platform == "youtube" else None
     synced = failed = api_calls = 0
     first_error = None
     for post in posts:
@@ -1044,7 +1119,9 @@ def _sync_account_posts_individually(
         _record_instagram_success(account)
         attempted_at = timezone.now()
         with transaction.atomic():
-            _write_post_metrics_snapshot(post, metrics, account.platform, on_date)
+            _write_post_metrics_snapshot(
+                post, metrics, account.platform, on_date, youtube_generation=youtube_generation
+            )
             _record_post_sync_success([post.pk], attempted_at)
         synced += 1
 
@@ -1263,6 +1340,17 @@ def _sync_one_account(account, on_date, now, *, cache, force_today=False, deadli
     try:
         if not blocked(account_scope):
             has_today_rows = AccountInsightsSnapshot.objects.filter(social_account=account, date=on_date).exists()
+            if account.platform == "youtube":
+                from .models import YouTubePeriodReport
+                from .youtube_reports import reporting_window
+
+                report_start, report_end = reporting_window(7)
+                has_today_rows = YouTubePeriodReport.objects.filter(
+                    social_account=account,
+                    start_date=report_start,
+                    end_date=report_end,
+                    captured_at__gte=now - timedelta(hours=24),
+                ).exists()
             if not account.analytics_needs_reconnect and (
                 force_today or not has_today_rows or _needs_empty_follower_count_refresh(account)
             ):

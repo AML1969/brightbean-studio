@@ -17,6 +17,8 @@ register = template.Library()
 @register.filter
 def fmt_metric(value, kind: str = "count") -> str:
     """Match the design's ``fmt.metric`` (analytics/charts.jsx)."""
+    if value is None:
+        return "—"
     try:
         v = float(value)
     except (TypeError, ValueError):

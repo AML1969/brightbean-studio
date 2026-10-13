@@ -14,6 +14,7 @@ from django.contrib import messages
 from django.contrib.auth.decorators import login_required
 from django.core import signing
 from django.core.exceptions import PermissionDenied
+from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_GET, require_POST
@@ -418,6 +419,7 @@ def oauth_callback(request, platform):
             workspace_id=workspace_id,
             platform=platform,
             profile=profile,
+            authorizing_user=request.user,
             access_token=tokens.access_token,
             refresh_token=tokens.refresh_token,
             expires_in=tokens.expires_in,
@@ -851,6 +853,15 @@ def _render_account_card(request, account, workspace_id):
 def disconnect(request, workspace_id, account_id):
     """Disconnect a social account."""
     account = get_object_or_404(SocialAccount.objects.for_workspace(workspace_id), id=account_id)
+    if account.platform == "youtube":
+        from .youtube_compliance import purge_connection
+
+        name = account.account_name or account.account_handle
+        purge_connection(account)
+        messages.success(request, f"Disconnected {name}. YouTube data was deleted immediately.")
+        if request.headers.get("HX-Request"):
+            return render(request, "social_accounts/partials/_empty.html")
+        return redirect("social_accounts:list", workspace_id=workspace_id)
 
     # Stop the platform pushing us this account's activity before we drop the
     # token that would let us unsubscribe.
@@ -984,6 +995,7 @@ def resolve_page_account_token(page: dict, platform: str, user_access_token: str
     return token or ""
 
 
+@transaction.atomic
 def _create_or_update_account(
     *,
     workspace_id,
@@ -997,6 +1009,7 @@ def _create_or_update_account(
     facebook_user_access_token=None,
     facebook_user_token_expires_at=None,
     messaging_access=None,
+    authorizing_user=None,
 ):
     """Create or update a SocialAccount from OAuth results."""
     token_expires_at = None
@@ -1004,6 +1017,18 @@ def _create_or_update_account(
         token_expires_at = timezone.now() + timedelta(seconds=expires_in)
 
     analytics_defaults = {}
+    if platform == "youtube":
+        from apps.organizations.models import Organization
+
+        org = Organization.objects.select_for_update().get(workspaces__pk=workspace_id)
+        if org.is_deletion_pending:
+            raise PermissionDenied("Cancel organization deletion before reconnecting YouTube.")
+        analytics_defaults = {
+            "youtube_authorization_checked_at": timezone.now(),
+            "youtube_profile_refreshed_at": timezone.now(),
+        }
+        if authorizing_user is not None:
+            analytics_defaults["youtube_authorized_by"] = authorizing_user
     if platform == "instagram" and facebook_user_access_token is not None:
         from django.utils.dateparse import parse_datetime
 
@@ -1052,6 +1077,12 @@ def _create_or_update_account(
         from apps.calendar.services import create_default_queue_and_slots
 
         create_default_queue_and_slots(account)
+
+    if platform == "youtube":
+        from django.db.models import F
+
+        SocialAccount.objects.filter(pk=account.pk).update(youtube_data_generation=F("youtube_data_generation") + 1)
+        account.refresh_from_db()
 
     subscribe_account_webhooks_task(str(account.id))
 

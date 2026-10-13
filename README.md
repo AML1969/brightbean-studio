@@ -43,7 +43,7 @@ A free hosted version is available at [brightbean.xyz/studio](https://brightbean
 | **Media library** | Org- and workspace-scoped libraries with nested folders, auto-generated platform-optimized variants, alt text, and built-in Unsplash stock-photo search in the composer. |
 | **Client portal** | Passwordless 30-day magic-link access so clients can approve or reject posts without creating an account. |
 | **Notifications** | In-app, email, and webhook delivery with per-user preferences for every event type. |
-| **Security & ops** | Encrypted token & credential storage, Google SSO, Sentry support, and a 14-day reversible org-deletion grace period. 2FA (TOTP) is on the roadmap. |
+| **Security & ops** | Encrypted token & credential storage, Google SSO, Sentry support, and a 14-day org-deletion grace period for non-YouTube data. YouTube connections and copied API data are removed immediately when deletion is requested. 2FA (TOTP) is on the roadmap. |
 | **White-label friendly** | Per-workspace branding (logo, colors) and workspace defaults for hashtags, first comments, and posting templates. |
 
 ### A quick look
@@ -603,9 +603,39 @@ If you set only the Path B (Company) credentials, Brightbean Studio automaticall
 
 YouTube and Google Business Profile share the same Google Cloud credentials.
 
+YouTube analytics uses native channel reports: views, total watch time, average
+percentage viewed, likes, comments, shares and subscribers gained. The 7/30/90-day
+windows follow Pacific calendar dates and end yesterday. Missing reports remain
+unavailable; daily chart gaps are not reconstructed from lifetime totals. YouTube
+engagement rates are not calculated. Headline averages come from the whole-period
+report rather than averages of daily percentages.
+
+Existing YouTube connections keep their grants and do not require a migration
+reconnect. New connections and voluntary renewals record the user who authorized
+them. Disconnecting YouTube, deleting that recorded authorizing user, or requesting
+organization deletion immediately removes YouTube connections and copied API data,
+including comment and publish-error notification copies. Original authored posts
+and uploaded media remain; other organization data keeps its 14-day deletion grace
+period. Cancelling organization deletion requires reconnecting YouTube.
+
+The daily YouTube compliance worker checks authorization and retained video
+existence in every connection status, including videos older than 90 days. Copied
+profiles/comments are refreshed by day 25 and removed by day 29 if retrieval still
+fails. Authorized statistical history is retained for 180 days; current lifetime
+statistics also require verified authorization and video existence. Revocation is
+attempted after local cleanup commits; transient failures use an encrypted outbox
+that expires after seven days.
+
+Automatic age-based enforcement defaults to off until staging counts and worker
+execution have been reviewed (`YOUTUBE_COMPLIANCE_ENFORCEMENT=false`). Explicit
+deletion requests and confirmed permanent grant rejection still trigger immediate
+cleanup. See [the YouTube audit implementation and rollout notes](development_specs/youtube-audit-remediation.md)
+before enabling enforcement. Intelligence is outside this remediation.
+
 1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and create a new project (or select an existing one)
 2. Enable the following APIs under **APIs & Services → Library**:
    - **YouTube Data API v3** (for YouTube)
+   - **YouTube Analytics API** (for native YouTube channel reports)
    - **My Business Account Management API**, **My Business Business Information API**, and **Google My Business API** (for Google Business Profile)
 3. Go to **APIs & Services → Credentials** and create an **OAuth 2.0 Client ID** (type: Web application)
 4. Add the following redirect URIs under **Authorized redirect URIs**:

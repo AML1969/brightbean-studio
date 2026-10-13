@@ -518,6 +518,16 @@ class InboxSyncEngine:
             "received_at": msg.timestamp,
             "extra": msg.extra,
         }
+        if account.platform == "youtube":
+            from apps.social_accounts.models import SocialAccount
+
+            if (
+                not SocialAccount.objects.select_for_update()
+                .filter(pk=account.pk, youtube_data_generation=account.youtube_data_generation)
+                .exists()
+            ):
+                return
+            defaults["api_refreshed_at"] = timezone.now()
         if related_post_id:
             defaults["related_post_id"] = related_post_id
 

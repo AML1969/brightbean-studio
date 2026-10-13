@@ -78,6 +78,7 @@ def build_account_analytics(account: SocialAccount, days: int) -> AccountAnalyti
     hero = [
         DerivedMetricResponse.from_derived(card["metric"], card["label"], card["derived"])
         for card in hero_cards(account, days, bundle=bundle)
+        if card["derived"].available
     ]
     engagement_card_payload = engagement_card(account, days, bundle=bundle)
     engagement = None
@@ -110,6 +111,7 @@ def build_account_analytics(account: SocialAccount, days: int) -> AccountAnalyti
         follower_growth=growth_response,
         captured_at=captured_at,
         next_sync_eta=next_sync_eta,
+        reporting_period=bundle.get("reporting_period"),
     )
 
 
@@ -187,6 +189,7 @@ def _build_platform_post_analytics(platform_post, enabled_platforms: list[str]) 
             is_primary=tile["is_primary"],
         )
         for tile in detail["metric_tiles"]
+        if tile["value"] is not None
     ]
     return PlatformPostAnalyticsResponse(
         platform_post_id=platform_post.id,

@@ -31,7 +31,7 @@ from apps.social_accounts.youtube_compliance import (
 )
 from apps.workspaces.models import Workspace
 from providers.exceptions import APIError, OAuthError, QuotaExceededError
-from providers.types import AccountProfile, PostMetrics
+from providers.types import AccountProfile, OAuthTokens, PostMetrics
 from providers.types import InboxMessage as ProviderMessage
 
 pytestmark = pytest.mark.django_db
@@ -358,34 +358,59 @@ def test_daily_task_covers_every_status_and_dry_run_is_read_only(channel, settin
 
 def test_stale_grant_rejection_cannot_purge_a_voluntarily_renewed_connection(channel):
     provider = provider_for(channel)
-    channel.token_expires_at = timezone.now() - timedelta(days=1)
-    channel.save(update_fields=["token_expires_at"])
 
-    def rejected(*args):
+    def rejected(*args, **kwargs):
         SocialAccount.objects.filter(pk=channel.pk).update(youtube_data_generation=1, oauth_access_token="renewed")
         raise OAuthError("old grant", raw_response={"error": "invalid_grant"})
 
-    provider.refresh_token.side_effect = rejected
+    # Profile requests run outside the refresh lock, so a reconnect can finish
+    # while the platform's rejection of the previous grant is still in flight.
+    provider.get_profile.side_effect = rejected
     check_connection(channel, provider=provider)
     current = SocialAccount.objects.get(pk=channel.pk)
     assert current.oauth_access_token == "renewed"
 
 
-def test_pending_token_refresh_cannot_overwrite_a_new_grant(channel):
+def test_stale_token_refresh_cannot_overwrite_a_new_grant(channel):
     from providers.exceptions import TokenExpiredError
-    from providers.types import OAuthTokens
 
     provider = provider_for(channel)
-
-    def refreshed(*args):
-        SocialAccount.objects.filter(pk=channel.pk).update(youtube_data_generation=1, oauth_access_token="renewed")
-        return OAuthTokens(access_token="stale-refreshed")
-
-    provider.refresh_token.side_effect = refreshed
+    # A reconnect completes before the stale caller acquires the refresh lock.
+    # A reconnect during the request waits for that lock (see test_oauth_refresh).
+    SocialAccount.objects.filter(pk=channel.pk).update(youtube_data_generation=1, oauth_access_token="renewed")
     with pytest.raises(TokenExpiredError):
         channel.refresh_oauth_token(provider)
+    provider.refresh_token.assert_not_called()
     channel.refresh_from_db()
     assert channel.oauth_access_token == "renewed"
+
+
+@pytest.mark.parametrize("refresh", [False, True])
+def test_youtube_health_metadata_preserves_a_later_publisher_refresh(channel, refresh):
+    channel.token_expires_at = timezone.now() + timedelta(days=-1 if refresh else 30)
+    channel.save(update_fields=["token_expires_at"])
+    provider = provider_for(channel)
+    profile = provider.get_profile.return_value
+    provider.refresh_token.return_value = OAuthTokens(
+        access_token="health-access", refresh_token="health-refresh", expires_in=3600
+    )
+    publisher = Mock()
+    publisher.refresh_token.return_value = OAuthTokens(
+        access_token="publisher-access", refresh_token="publisher-refresh", expires_in=7200
+    )
+
+    def get_profile(*args, **kwargs):
+        current = SocialAccount.objects.get(pk=channel.pk)
+        current.refresh_oauth_token(publisher, enqueue_backfill=False)
+        return profile
+
+    provider.get_profile.side_effect = get_profile
+    check_connection(channel, provider=provider)
+    channel.refresh_from_db()
+    assert channel.oauth_access_token == "publisher-access"
+    assert channel.oauth_refresh_token == "publisher-refresh"
+    assert channel.token_expires_at > timezone.now() + timedelta(minutes=119)
+    publisher.refresh_token.assert_called_once_with("health-refresh" if refresh else "fictional-refresh")
 
 
 def test_deletion_pending_organization_cannot_recreate_youtube_connections(channel, user):

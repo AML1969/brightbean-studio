@@ -1500,8 +1500,9 @@ def deduplicate_pending_backfills() -> int:
     duplicates = list(pending.values("task_hash").annotate(count=Count("pk"), keep=Max("pk")).filter(count__gt=1))
     deleted = 0
     for group in duplicates:
-        # Recheck lock fields in the DELETE so a concurrent claim is preserved.
-        count, _ = pending.filter(task_hash=group["task_hash"]).exclude(pk=group["keep"]).delete()
+        # Recheck locks and only remove jobs older than the snapshot's survivor.
+        # A reconnect can replace the group with a newer job before this DELETE.
+        count, _ = pending.filter(task_hash=group["task_hash"], pk__lt=group["keep"]).delete()
         deleted += count
     return deleted
 

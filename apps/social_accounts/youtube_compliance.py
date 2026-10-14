@@ -151,25 +151,13 @@ def _grant_and_profile(account, provider):
     """Verify the stored grant; never require a migration-related reconnect."""
     token = account.oauth_access_token
     if account.oauth_refresh_token and account.token_expires_within(timedelta(minutes=5)):
-        tokens = provider.refresh_token(account.oauth_refresh_token)
-        token = tokens.access_token
-        account.oauth_access_token = token
-        if tokens.refresh_token:
-            account.oauth_refresh_token = tokens.refresh_token
-        if tokens.expires_in:
-            account.token_expires_at = timezone.now() + timedelta(seconds=tokens.expires_in)
+        token = account.refresh_oauth_token(provider, enqueue_backfill=False)
     try:
         profile = provider.get_profile(token, channel_id=account.account_platform_id)
     except TokenExpiredError:
         if not account.oauth_refresh_token:
             raise
-        tokens = provider.refresh_token(account.oauth_refresh_token)
-        token = tokens.access_token
-        account.oauth_access_token = token
-        if tokens.refresh_token:
-            account.oauth_refresh_token = tokens.refresh_token
-        if tokens.expires_in:
-            account.token_expires_at = timezone.now() + timedelta(seconds=tokens.expires_in)
+        token = account.refresh_oauth_token(provider, enqueue_backfill=False)
         profile = provider.get_profile(token, channel_id=account.account_platform_id)
     if profile.platform_id != account.account_platform_id:
         raise APIError("The connected channel was not returned by the authorization check", platform="youtube")
@@ -273,8 +261,8 @@ def check_connection(account, *, provider=None, now=None, enforce=True):
             )
             if current is None:
                 return
-            for field in ("oauth_access_token", "oauth_refresh_token", "token_expires_at"):
-                setattr(current, field, getattr(account, field))
+            # The refresh helper already saved credentials under its row lock;
+            # a publisher may have rotated them again during the profile call.
             current.account_name, current.account_handle = profile.name, profile.handle or ""
             current.avatar_url, current.follower_count = profile.avatar_url or "", profile.follower_count or 0
             current.youtube_authorization_checked_at = current.youtube_profile_refreshed_at = now
@@ -284,9 +272,6 @@ def check_connection(account, *, provider=None, now=None, enforce=True):
             current.last_error = ""
             current.save(
                 update_fields=[
-                    "oauth_access_token",
-                    "oauth_refresh_token",
-                    "token_expires_at",
                     "account_name",
                     "account_handle",
                     "avatar_url",

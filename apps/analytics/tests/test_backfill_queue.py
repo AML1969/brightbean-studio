@@ -6,6 +6,7 @@ from unittest.mock import Mock, patch
 
 import pytest
 from background_task.models import Task
+from django.db.models import QuerySet
 from django.test import TestCase
 from django.utils import timezone
 
@@ -81,6 +82,30 @@ def test_health_check_without_refresh_does_not_overwrite_concurrently_rotated_to
         check_social_account_health.now(str(account.pk))
     account.refresh_from_db()
     assert account.oauth_access_token == "publisher-token"
+
+
+def test_health_check_with_refresh_preserves_a_later_publisher_refresh(account, provider):
+    account.token_expires_at = timezone.now() + timedelta(minutes=1)
+    account.save(update_fields=["token_expires_at"])
+    publisher = Mock()
+    publisher.refresh_token.return_value = OAuthTokens(
+        access_token="publisher-token", refresh_token="publisher-refresh", expires_in=7200
+    )
+
+    def profile(token):
+        current = SocialAccount.objects.get(pk=account.pk)
+        current.refresh_oauth_token(publisher, enqueue_backfill=False)
+        return AccountProfile(platform_id="queue-account", name="Queue Account", follower_count=5)
+
+    provider.get_profile.side_effect = profile
+    with patch("providers.get_provider", return_value=provider):
+        check_social_account_health.now(str(account.pk))
+    account.refresh_from_db()
+    assert account.oauth_access_token == "publisher-token"
+    assert account.oauth_refresh_token == "publisher-refresh"
+    assert account.token_expires_at > timezone.now() + timedelta(minutes=119)
+    publisher.refresh_token.assert_called_once_with("fresh-refresh")
+    assert Task.objects.filter(task_name=backfill_account_analytics.name).count() == 0
 
 
 def test_publish_token_refresh_does_not_queue_backfill(account, provider):
@@ -188,3 +213,24 @@ def test_startup_deduplication_preserves_parameter_sets_and_locked_jobs(account)
     assert Task.objects.filter(pk=locked.pk).exists()
     assert Task.objects.filter(pk=other_parameters.pk).exists()
     assert deduplicate_pending_backfills() == 0
+
+
+def test_startup_deduplication_preserves_a_concurrent_reconnect_replacement(account):
+    for _ in range(3):
+        Task.objects.new_task(backfill_account_analytics.name, args=[str(account.pk)]).save()
+    original_delete = QuerySet.delete
+    replacements = []
+
+    def reconnect_before_delete(queryset):
+        if not replacements:
+            # The reconnect replaces the snapshotted jobs just before cleanup
+            # reaches its DELETE. Set the guard before queueing invokes DELETE.
+            replacements.append(None)
+            replacements[0] = backfill_account_analytics(str(account.pk))
+        return original_delete(queryset)
+
+    with patch.object(QuerySet, "delete", reconnect_before_delete):
+        assert deduplicate_pending_backfills() == 0
+    assert list(Task.objects.filter(task_name=backfill_account_analytics.name).values_list("pk", flat=True)) == [
+        replacements[0].pk
+    ]

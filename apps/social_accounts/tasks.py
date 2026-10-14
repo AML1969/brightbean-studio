@@ -1,7 +1,6 @@
 """Background tasks for social account health checks."""
 
 import logging
-from datetime import timedelta
 
 from background_task import background
 from django.utils import timezone
@@ -77,18 +76,10 @@ def _check_social_account_health(account_id: str):
     # 60 days — so a refresh is always the right move when expiry is unknown.
     # Platforms whose refresh token outlives the access token are deliberately
     # left out: for them an unknown expiry means nothing needs doing yet.
-    tokens_refreshed = False
     needs_expiry_bootstrap = account.platform in EXPIRY_BOOTSTRAP_PLATFORMS and account.token_expires_at is None
     if (account.is_token_expiring_soon or needs_expiry_bootstrap) and account.oauth_refresh_token:
         try:
-            new_tokens = provider.refresh_token(account.oauth_refresh_token)
-            account.oauth_access_token = new_tokens.access_token
-            if new_tokens.refresh_token:
-                account.oauth_refresh_token = new_tokens.refresh_token
-            if new_tokens.expires_in:
-                account.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
-            tokens_refreshed = True
-            account.connection_status = SocialAccount.ConnectionStatus.CONNECTED
+            account.refresh_oauth_token(provider, enqueue_backfill=False)
             account.last_error = ""
             logger.info("Health check: refreshed token for %s", account)
         except Exception as e:
@@ -102,9 +93,8 @@ def _check_social_account_health(account_id: str):
     # reconnecting draws on, so the probe competes with the recovery it is
     # trying to detect.
     #
-    # Skipped rather than returned early: a refresh may have just rotated this
-    # account's token, and that belongs in the save below whether or not we got
-    # to ask the platform how it is doing. The refresh itself is unaffected —
+    # Skipped rather than returned early so the card records the quota block.
+    # Any refreshed token is already saved. The refresh itself is unaffected —
     # Google meters the token endpoint separately from the Data API.
     #
     # ``read_scope`` rather than a literal, so this, the inbox poll and the
@@ -178,11 +168,8 @@ def _check_social_account_health(account_id: str):
         "last_health_check_at",
         "updated_at",
     ]
-    # A health check is not a reconnect. Suppress analytics fan-out even when
-    # it rotates a token, and avoid overwriting a concurrent publisher's fresh
-    # tokens when this check did not refresh them.
-    if tokens_refreshed:
-        fields.extend(["oauth_access_token", "oauth_refresh_token", "token_expires_at"])
+    # Tokens were saved inside the shared refresh lock. Saving only metadata
+    # here preserves any publisher refresh that happened during get_profile.
     account._skip_analytics_backfill = True
     try:
         account.save(update_fields=fields)

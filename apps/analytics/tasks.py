@@ -1392,7 +1392,7 @@ def _sync_one_account(account, on_date, now, *, cache, force_today=False, deadli
 # ---------------------------------------------------------------------------
 
 
-@background(schedule=0)
+@background(schedule=0, remove_existing_tasks=True)
 def backfill_account_analytics(account_id: str, days: int | None = None) -> None:
     """One-shot backfill on account connect / reconnect.
 
@@ -1479,6 +1479,32 @@ def backfill_account_analytics(account_id: str, days: int | None = None) -> None
         failed,
         api_calls,
     )
+
+
+def deduplicate_pending_backfills() -> int:
+    """Keep one pending job per parameter set, including pre-fix backlogs.
+
+    Never remove a locked job. Its platform requests may already be in flight,
+    and a genuine reconnect may have queued a follow-up while it was running.
+    """
+    from background_task.models import Task
+    from django.db.models import Count, Max
+
+    pending = Task.objects.filter(
+        task_name=backfill_account_analytics.name,
+        locked_at__isnull=True,
+        locked_by__isnull=True,
+        failed_at__isnull=True,
+        repeat=0,
+    )
+    duplicates = list(pending.values("task_hash").annotate(count=Count("pk"), keep=Max("pk")).filter(count__gt=1))
+    deleted = 0
+    for group in duplicates:
+        # Recheck locks and only remove jobs older than the snapshot's survivor.
+        # A reconnect can replace the group with a newer job before this DELETE.
+        count, _ = pending.filter(task_hash=group["task_hash"], pk__lt=group["keep"]).delete()
+        deleted += count
+    return deleted
 
 
 @background(schedule=0)

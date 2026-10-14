@@ -2,7 +2,7 @@ import uuid
 from typing import Any
 
 from django.conf import settings
-from django.db import models, transaction
+from django.db import models, router, transaction
 from django.utils import timezone
 
 from apps.common.encryption import EncryptedTextField
@@ -303,83 +303,85 @@ class SocialAccount(models.Model):
         ``refresh_token`` raises so callers decide between degrading (publish
         engine keeps the old token) and aborting (composer endpoints 502).
 
-        ``enqueue_backfill=False`` is for scheduled analytics refreshes. The
-        token rotation itself is enough for that sync pass; queueing the
-        ``oauth_access_token`` post-save signal as well would start a duplicate
-        full backfill every time an hourly run refreshes a near-expiry token.
+        ``enqueue_backfill=False`` is for routine token rotations (publishing,
+        analytics, inbox polls, and composer lookups). A rotation is not a new
+        connection and must not queue a full historical analytics backfill.
+
+        Serialize refreshes with a row lock on PostgreSQL or an account lock
+        within the SQLite worker. A caller that waited for another refresh uses
+        its persisted credentials rather than resubmitting the refresh token.
         """
         from datetime import timedelta
 
         from django.utils import timezone
 
+        from .token_refresh import token_refresh_lock, token_refresh_transaction
+
+        using = router.db_for_write(type(self), instance=self)
+        accounts = type(self).objects.using(using)
+        token_fields = ("oauth_access_token", "oauth_refresh_token", "token_expires_at")
         try:
-            new_tokens = provider.refresh_token(self.oauth_refresh_token)
+            with token_refresh_lock(using, self.pk):
+                with token_refresh_transaction(using):
+                    current = accounts.select_for_update().get(pk=self.pk)
+                    if self.platform == "youtube" and current.youtube_data_generation != self.youtube_data_generation:
+                        from providers.exceptions import TokenExpiredError
+
+                        raise TokenExpiredError("YouTube connection changed during token refresh", platform="youtube")
+                if all(getattr(current, field) == getattr(self, field) for field in token_fields):
+                    new_tokens = provider.refresh_token(current.oauth_refresh_token)
+                    # SQLite has no row lock during HTTP. Discard a result if
+                    # another process replaced the stored credentials meanwhile.
+                    with token_refresh_transaction(using):
+                        current = accounts.select_for_update().get(pk=self.pk)
+                        if (
+                            self.platform == "youtube"
+                            and current.youtube_data_generation != self.youtube_data_generation
+                        ):
+                            from providers.exceptions import TokenExpiredError
+
+                            raise TokenExpiredError(
+                                "YouTube connection changed during token refresh", platform="youtube"
+                            )
+                        if all(getattr(current, field) == getattr(self, field) for field in token_fields):
+                            current.oauth_access_token = new_tokens.access_token
+                            if new_tokens.refresh_token:
+                                current.oauth_refresh_token = new_tokens.refresh_token
+                            if new_tokens.expires_in:
+                                current.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
+                            current.connection_status = self.ConnectionStatus.CONNECTED
+                            current._skip_analytics_backfill = not enqueue_backfill
+                            current.save(using=using, update_fields=[*token_fields, "connection_status", "updated_at"])
+                state_fields = [*token_fields, "connection_status"]
+                if self.platform == "instagram":
+                    # save() invalidates Instagram analytics on a rotation.
+                    # Keep the caller's generation and cached verdicts in sync
+                    # even though the locked instance performed that save.
+                    if current.analytics_credentials_version != self.analytics_credentials_version:
+                        self.__dict__.pop("_instagram_analytics_grant", None)
+                        self.__dict__.pop("_instagram_analytics_status_recorded", None)
+                    state_fields.extend(
+                        [
+                            "oauth_facebook_user_access_token",
+                            "facebook_user_token_expires_at",
+                            "analytics_credentials_version",
+                            "analytics_status",
+                            "analytics_error_reason",
+                            "analytics_checked_at",
+                            "analytics_needs_reconnect",
+                        ]
+                    )
+                for field in state_fields:
+                    setattr(self, field, getattr(current, field))
         except Exception as exc:
             if self.platform == "youtube":
                 from .youtube_compliance import permanent_grant_rejection, purge_connection
 
+                # Purge after the failed refresh transaction has rolled back.
                 if permanent_grant_rejection(exc):
                     purge_connection(self, check_generation=True)
             raise
-        if self.platform == "youtube":
-            with transaction.atomic():
-                current = (
-                    type(self)
-                    .objects.select_for_update()
-                    .filter(pk=self.pk, youtube_data_generation=self.youtube_data_generation)
-                    .first()
-                )
-                if current is None:
-                    from providers.exceptions import TokenExpiredError
-
-                    raise TokenExpiredError("YouTube connection changed during token refresh", platform="youtube")
-                current.oauth_access_token = new_tokens.access_token
-                if new_tokens.refresh_token:
-                    current.oauth_refresh_token = new_tokens.refresh_token
-                if new_tokens.expires_in:
-                    current.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
-                current.connection_status = self.ConnectionStatus.CONNECTED
-                current._skip_analytics_backfill = not enqueue_backfill
-                current.save(
-                    update_fields=[
-                        "oauth_access_token",
-                        "oauth_refresh_token",
-                        "token_expires_at",
-                        "connection_status",
-                        "updated_at",
-                    ]
-                )
-                self.oauth_access_token = current.oauth_access_token
-                self.oauth_refresh_token = current.oauth_refresh_token
-                self.token_expires_at = current.token_expires_at
-                self.connection_status = current.connection_status
-                return current.oauth_access_token
-        self.oauth_access_token = new_tokens.access_token
-        if new_tokens.refresh_token:
-            self.oauth_refresh_token = new_tokens.refresh_token
-        if new_tokens.expires_in:
-            self.token_expires_at = timezone.now() + timedelta(seconds=new_tokens.expires_in)
-        self.connection_status = self.ConnectionStatus.CONNECTED
-        update_fields = [
-            "oauth_access_token",
-            "oauth_refresh_token",
-            "token_expires_at",
-            "connection_status",
-            "updated_at",
-        ]
-        if enqueue_backfill:
-            self.save(update_fields=update_fields)
-        else:
-            # post_save signals do not receive caller-local keyword arguments.
-            # A short-lived instance flag keeps the token in the normal
-            # update_fields path while telling analytics.signals that this save
-            # is already part of the analytics pass.
-            self._skip_analytics_backfill = True
-            try:
-                self.save(update_fields=update_fields)
-            finally:
-                del self._skip_analytics_backfill
-        return new_tokens.access_token
+        return self.oauth_access_token
 
     # Platform character limits
     PLATFORM_CHAR_LIMITS = {

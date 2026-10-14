@@ -2131,7 +2131,7 @@ def pinterest_boards(request, workspace_id, account_id):
     access_token = account.oauth_access_token
     if account.token_expires_at and account.is_token_expiring_soon:
         try:
-            access_token = account.refresh_oauth_token(provider)
+            access_token = account.refresh_oauth_token(provider, enqueue_backfill=False)
         except Exception:
             return JsonResponse({"error": "Token refresh failed"}, status=502)
 
@@ -2184,7 +2184,7 @@ def tiktok_creator_info(request, workspace_id, account_id):
     access_token = account.oauth_access_token
     if account.token_expires_at and account.is_token_expiring_soon:
         try:
-            access_token = account.refresh_oauth_token(provider)
+            access_token = account.refresh_oauth_token(provider, enqueue_backfill=False)
         except Exception:
             return _unavailable("Token refresh failed")
 

@@ -112,7 +112,6 @@
 {% endblock %}
 
 {% block content %}
-{% for account in social_accounts %}{% if account.platform == "youtube" %}{% ifchanged account.platform %}{% include "partials/_youtube_attribution.html" with youtube_account=account youtube_attribution_label="Publishing calendar" %}{% endifchanged %}{% endif %}{% endfor %}
 <div class="cross-calendar-main" x-data="{ viewOpen: false, wsOpen: false }">
     <!-- Toolbar -->
     <div class="bg-white border-b border-stone-200 px-6 py-3 flex flex-wrap items-center gap-3">

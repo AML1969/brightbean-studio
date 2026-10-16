@@ -1,6 +1,7 @@
 from allauth.account.views import LoginView, SignupView
+from django.conf import settings
 
-from .signup_links import custom_signup_url, pending_invite_email
+from .signup_links import custom_signup_url, pending_invite_email, signup_allowed
 
 
 class InvitePrefillSignupView(SignupView):
@@ -21,13 +22,16 @@ class InvitePrefillSignupView(SignupView):
 
 
 class SignupLinkLoginView(LoginView):
-    """Login view whose "Sign up" link honors ``CUSTOM_SIGNUP_URL``.
+    """Login view whose "Sign up" link honors ``CUSTOM_SIGNUP_URL`` and ``SIGNUP_MODE``.
 
     allauth's ``signup_url`` (with its ``?next=`` passthrough) is kept when the
-    setting is empty or an invite is pending.
+    setting is empty or an invite is pending. The link is hidden only when it
+    would lead to the closed-signup notice: no custom URL, and this visitor may
+    not sign up.
     """
 
     def get_context_data(self, **kwargs):
         ctx = super().get_context_data(**kwargs)
         ctx["signup_url"] = custom_signup_url(self.request) or ctx.get("signup_url")
+        ctx["show_signup_link"] = bool(settings.CUSTOM_SIGNUP_URL) or signup_allowed(self.request)
         return ctx

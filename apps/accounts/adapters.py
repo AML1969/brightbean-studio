@@ -2,28 +2,11 @@ from allauth.account.adapter import DefaultAccountAdapter
 from allauth.core.exceptions import ImmediateHttpResponse
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from allauth.utils import build_absolute_uri
-from django.conf import settings
 from django.shortcuts import redirect
 
 from apps.accounts.models import OAuthConnection
-from apps.accounts.signup_links import custom_signup_url, pending_invite_email
+from apps.accounts.signup_links import custom_signup_url, signup_allowed
 from apps.common.mail import transactional
-
-
-def signup_allowed(request):
-    """Whether a brand-new account may be created for this request, per ``SIGNUP_MODE``.
-
-    Only ever asked when an account would actually be created. Signing in
-    with an existing account — including a social login that connects to an
-    existing user by email — does not pass through here. In invite mode the
-    visitor must carry a still-open invitation (see ``pending_invite_email``).
-    """
-    mode = settings.SIGNUP_MODE
-    if mode == "open":
-        return True
-    if mode == "closed":
-        return False
-    return pending_invite_email(request) is not None
 
 
 class AccountAdapter(DefaultAccountAdapter):

@@ -168,6 +168,67 @@ class TestInvitees:
         assert response.status_code == 302
         assert response.url == CUSTOM
 
+    def test_lapsed_invite_is_told_rather_than_redirected(self, settings, client, custom_signup_url, invitation):
+        """An invitee whose invite expired since following it should learn that, not land on another site."""
+        settings.SIGNUP_MODE = "invite"
+        self._open(client, invitation)
+        invitation.expires_at = timezone.now() - timedelta(minutes=1)
+        invitation.save(update_fields=["expires_at"])
+
+        assert _signup_href(client.get(reverse("account_login"))) == "/accounts/signup/"
+        response = client.get(reverse("account_signup"))
+        assert response.status_code == 200
+        assert b"Your invitation has expired or was already used" in response.content
+
+
+@pytest.mark.django_db
+class TestPendingInviteLookup:
+    def test_looked_up_once_per_request(self, settings, invitation, django_assert_num_queries):
+        from apps.accounts.signup_links import custom_signup_url, signup_allowed
+
+        settings.SIGNUP_MODE = "invite"
+        settings.CUSTOM_SIGNUP_URL = CUSTOM
+        request = RequestFactory().get("/")
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.session["pending_invite_token"] = invitation.token
+
+        with django_assert_num_queries(1):
+            assert signup_allowed(request) is True
+            assert custom_signup_url(request) == ""
+
+    def test_cache_drops_when_the_token_changes(self, settings, invitation):
+        from apps.accounts.signup_links import pending_invite_email
+
+        request = RequestFactory().get("/")
+        SessionMiddleware(lambda r: None).process_request(request)
+        request.session["pending_invite_token"] = invitation.token
+        assert pending_invite_email(request) == "invitee@example.com"
+
+        request.session.pop("pending_invite_token")
+        assert pending_invite_email(request) is None
+
+
+@pytest.mark.django_db
+class TestOrgDeletionRedirect:
+    def _delete_org_as_owner(self, client):
+        owner = User.objects.create_user(email="owner@example.com", password="x", tos_accepted_at=timezone.now())
+        client.force_login(owner)
+        return client.post(reverse("organizations:settings"), {"action": "delete_organization_now"})
+
+    @pytest.mark.parametrize("mode", ["invite", "closed"])
+    def test_goes_to_login_when_signup_would_be_closed(self, settings, client, mode):
+        settings.SIGNUP_MODE = mode
+        response = self._delete_org_as_owner(client)
+
+        assert response.status_code == 302
+        assert response.url == reverse("account_login")
+
+    def test_goes_to_custom_url_when_set(self, settings, client, custom_signup_url):
+        settings.SIGNUP_MODE = "closed"
+        response = self._delete_org_as_owner(client)
+
+        assert response.url == CUSTOM
+
 
 @pytest.mark.django_db
 class TestWithoutCustomUrl:
@@ -191,7 +252,12 @@ def _import_settings(**env):
     return subprocess.run(
         [sys.executable, "-c", "import config.settings.base"],
         cwd=django_settings.BASE_DIR,
-        env={**os.environ, "APP_URL": "https://studio.example.com", **env},
+        env={
+            **os.environ,
+            "APP_URL": "https://studio.example.com",
+            "ALLOWED_HOSTS": "studio.example.com,studio-alias.example.org,.example.net",
+            **env,
+        },
         capture_output=True,
         text=True,
         timeout=60,
@@ -201,7 +267,14 @@ def _import_settings(**env):
 class TestLoopGuard:
     @pytest.mark.parametrize(
         "url",
-        ["/accounts/signup/", "/accounts/signup", "https://studio.example.com/accounts/signup/"],
+        [
+            "/accounts/signup/",
+            "/accounts/signup",
+            "https://studio.example.com/accounts/signup/",
+            "https://Studio.Example.com:443/accounts/signup/",
+            "https://studio-alias.example.org/accounts/signup/",
+            "https://app.example.net/accounts/signup/",
+        ],
     )
     def test_custom_url_back_to_own_signup_refuses_to_start(self, url):
         result = _import_settings(SIGNUP_MODE="invite", CUSTOM_SIGNUP_URL=url)

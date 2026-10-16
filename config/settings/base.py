@@ -298,11 +298,25 @@ if SIGNUP_MODE not in {"open", "invite", "closed"}:
     )
 # Outside open mode, visitors who may not sign up are redirected from
 # /accounts/signup/ to CUSTOM_SIGNUP_URL — pointing it back there would loop.
+# "This site" is APP_URL's host or any ALLOWED_HOSTS entry ("." prefix matches
+# subdomains); hostnames compare case-insensitively, ports are ignored.
 _custom_signup = urlparse(CUSTOM_SIGNUP_URL)
+_custom_signup_host = _custom_signup.hostname or ""
+
+
+def _is_own_host(host):
+    if not host:
+        return True
+    for pattern in [urlparse(APP_URL).hostname or "", *(h.lower() for h in ALLOWED_HOSTS)]:
+        if host == pattern or (pattern.startswith(".") and (host == pattern[1:] or host.endswith(pattern))):
+            return True
+    return False
+
+
 if (
     SIGNUP_MODE != "open"
     and _custom_signup.path.rstrip("/") == "/accounts/signup"
-    and _custom_signup.netloc in ("", urlparse(APP_URL).netloc)
+    and _is_own_host(_custom_signup_host)
 ):
     from django.core.exceptions import ImproperlyConfigured
 

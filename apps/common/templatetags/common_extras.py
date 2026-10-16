@@ -7,28 +7,20 @@ from django.utils.safestring import mark_safe
 register = template.Library()
 
 
-@register.simple_tag(takes_context=True)
-def show_signup_link(context):
-    """Whether the login page should show its "Sign up" link.
-
-    Shown when this visitor could sign up per SIGNUP_MODE, or when
-    CUSTOM_SIGNUP_URL is set (the link then points there). Hidden only when it
-    would lead to the closed-signup notice. In invite mode without a custom URL
-    this is True exactly for visitors who followed an invitation link.
-    """
-    from django.conf import settings
-
-    from apps.accounts.adapters import signup_allowed
-
-    return bool(settings.CUSTOM_SIGNUP_URL) or signup_allowed(context.get("request"))
-
-
 @register.simple_tag
 def signup_mode():
     """The configured SIGNUP_MODE, so the closed-signup notice can say why."""
     from django.conf import settings
 
     return settings.SIGNUP_MODE
+
+
+@register.simple_tag(takes_context=True)
+def invite_lapsed(context):
+    """Whether the visitor's invitation expired or was used since they followed it."""
+    from apps.accounts.signup_links import has_lapsed_invite
+
+    return has_lapsed_invite(context.get("request"))
 
 
 @register.filter(is_safe=True)

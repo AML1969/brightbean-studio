@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% load static i18n allauth account socialaccount common_extras %}
+{% load static i18n allauth account socialaccount %}
 
 {% block title %}Log in · BrightBean Studio{% endblock %}
 
@@ -120,8 +120,7 @@
     </div>
 
     <!-- Footer link -->
-    {% show_signup_link as can_signup %}
-    {% if can_signup %}
+    {% if show_signup_link %}
     <p class="text-center text-sm mt-6" style="color: var(--text-secondary);">
         Don't have an account?
         <a href="{{ signup_url }}" class="font-semibold hover:underline" style="color: var(--primary);">Sign up</a>

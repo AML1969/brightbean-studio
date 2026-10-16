@@ -1,4 +1,6 @@
 from allauth.account.views import LoginView, SignupView
+from allauth.core.exceptions import ImmediateHttpResponse
+from allauth.socialaccount.views import SignupView as SocialSignupView
 from django.conf import settings
 
 from .signup_links import custom_signup_url, pending_invite_email, signup_allowed
@@ -19,6 +21,29 @@ class InvitePrefillSignupView(SignupView):
         ctx = super().get_context_data(**kwargs)
         ctx["invited_email_locked"] = bool(pending_invite_email(self.request))
         return ctx
+
+    def form_valid(self, form):
+        # allauth only catches ImmediateHttpResponse around completing the
+        # signup, not around saving the user, where an invite-mode signup
+        # that lost its invitation to a concurrent one is refused.
+        try:
+            return super().form_valid(form)
+        except ImmediateHttpResponse as e:
+            return e.response
+
+
+class InviteClaimSocialSignupView(SocialSignupView):
+    """allauth's third-party signup form, refusing cleanly when the invite was used meanwhile.
+
+    Reached when a social auto-signup cannot complete on its own (e.g. the
+    provider gave no usable email); see ``InvitePrefillSignupView.form_valid``.
+    """
+
+    def form_valid(self, form):
+        try:
+            return super().form_valid(form)
+        except ImmediateHttpResponse as e:
+            return e.response
 
 
 class SignupLinkLoginView(LoginView):

@@ -47,6 +47,13 @@ def pending_invite_email(request):
     return email
 
 
+def mark_invite_lapsed(request):
+    """Record that the session's invite turned out to be used, for the rest of this request."""
+    token = _session_invite_token(request)
+    if token and request is not None:
+        request._pending_invite_email = (token, None)
+
+
 def has_lapsed_invite(request):
     """Whether the session carries an invite token that no longer works.
 

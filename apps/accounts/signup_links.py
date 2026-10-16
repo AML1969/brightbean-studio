@@ -2,8 +2,10 @@
 
 ``CUSTOM_SIGNUP_URL`` moves every Studio-generated signup link (the login page,
 the unknown-account email, the redirect after an owner deletes their org) to
-another page. It only moves the links: ``/accounts/signup/`` stays open, so
-that page may send people back to it.
+another page. With ``SIGNUP_MODE=open`` it only moves the links:
+``/accounts/signup/`` stays open, so that page may send people back to it. With
+``invite`` or ``closed``, anyone who may not sign up is also redirected there
+from the signup page and the Google callback (``apps.accounts.adapters``).
 """
 
 from django.conf import settings
@@ -33,10 +35,14 @@ def pending_invite_email(request):
 def custom_signup_url(request):
     """``CUSTOM_SIGNUP_URL``, or "" when the built-in signup should be linked.
 
-    An invitee always gets the built-in signup, because only it pre-fills the
-    invited email and accepts the invite on signup. Without this, an invitee
-    who picks "Log In to Join" and then "Sign up" would lose the invite.
+    An invitee gets the built-in signup, because only it pre-fills the invited
+    email and accepts the invite on signup. Without this, an invitee who picks
+    "Log In to Join" and then "Sign up" would lose the invite. Not in closed
+    mode, though: there an invite cannot create an account, so the built-in
+    signup would only bounce them to ``CUSTOM_SIGNUP_URL`` anyway.
     """
-    if not settings.CUSTOM_SIGNUP_URL or pending_invite_email(request):
+    if not settings.CUSTOM_SIGNUP_URL:
+        return ""
+    if settings.SIGNUP_MODE != "closed" and pending_invite_email(request):
         return ""
     return settings.CUSTOM_SIGNUP_URL

@@ -296,6 +296,20 @@ if SIGNUP_MODE not in {"open", "invite", "closed"}:
         "Refusing to guess, because falling back to a default would silently "
         "leave signup open."
     )
+# Outside open mode, visitors who may not sign up are redirected from
+# /accounts/signup/ to CUSTOM_SIGNUP_URL — pointing it back there would loop.
+_custom_signup = urlparse(CUSTOM_SIGNUP_URL)
+if (
+    SIGNUP_MODE != "open"
+    and _custom_signup.path.rstrip("/") == "/accounts/signup"
+    and _custom_signup.netloc in ("", urlparse(APP_URL).netloc)
+):
+    from django.core.exceptions import ImproperlyConfigured
+
+    raise ImproperlyConfigured(
+        f"CUSTOM_SIGNUP_URL points at Studio's own signup page, which redirects to "
+        f"CUSTOM_SIGNUP_URL when SIGNUP_MODE={SIGNUP_MODE}. Leave it empty or point it elsewhere."
+    )
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",

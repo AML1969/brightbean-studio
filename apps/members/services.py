@@ -71,13 +71,24 @@ def create_invitation(org, email, org_role, workspace_assignments, invited_by, *
         The created Invitation.
 
     Raises:
-        ValueError: If the email already belongs to a member or has a pending invite.
+        ValueError: If the email already belongs to a member or has a pending invite,
+            or SIGNUP_MODE is closed and the email has no account.
     """
     email = email.strip().lower()
 
     # Check if already a member
     if OrgMembership.objects.filter(organization=org, user__email=email).exists():
         raise ValueError("This person is already a member of your organization.")
+
+    # With SIGNUP_MODE=closed an invitation cannot create an account, so it
+    # could only ever be accepted by someone who already has one.
+    if settings.SIGNUP_MODE == "closed":
+        from django.contrib.auth import get_user_model
+
+        if not get_user_model().objects.filter(email__iexact=email).exists():
+            raise ValueError(
+                "Sign-up is closed on this installation, so only people who already have an account can be invited."
+            )
 
     # Check for pending invite
     pending = Invitation.objects.filter(

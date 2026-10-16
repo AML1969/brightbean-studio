@@ -8,17 +8,19 @@ register = template.Library()
 
 
 @register.simple_tag(takes_context=True)
-def signup_allowed(context):
-    """Whether this visitor could sign up, per SIGNUP_MODE.
+def show_signup_link(context):
+    """Whether the login page should show its "Sign up" link.
 
-    Used to hide the "Sign up" link on the login page when it would only
-    lead to a closed-signup notice. In invite mode this is True exactly for
-    visitors who followed an invitation link, so the link appears for the
-    people it is meant for and stays hidden for everyone else.
+    Shown when this visitor could sign up per SIGNUP_MODE, or when
+    CUSTOM_SIGNUP_URL is set (the link then points there). Hidden only when it
+    would lead to the closed-signup notice. In invite mode without a custom URL
+    this is True exactly for visitors who followed an invitation link.
     """
-    from apps.accounts.adapters import signup_allowed as _signup_allowed
+    from django.conf import settings
 
-    return _signup_allowed(context.get("request"))
+    from apps.accounts.adapters import signup_allowed
+
+    return bool(settings.CUSTOM_SIGNUP_URL) or signup_allowed(context.get("request"))
 
 
 @register.simple_tag

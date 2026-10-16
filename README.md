@@ -117,7 +117,7 @@ After deploying, set these environment variables in your platform's dashboard:
 | `EMAIL_HOST_PASSWORD` | No | SMTP password |
 | `GOOGLE_AUTH_CLIENT_ID` | No | For Google OAuth login. Get from [Google Cloud Console](https://console.cloud.google.com/) → Credentials. |
 | `GOOGLE_AUTH_CLIENT_SECRET` | No | Google OAuth secret |
-| `CUSTOM_SIGNUP_URL` | No | Where "Sign up" links point, e.g. a waitlist or marketing page: the login page's link, the email sent when someone resets the password of an address with no account, and the redirect after an owner deletes their organization. Must be an `http(s)://` URL or a path starting with `/`. Default: the built-in `/accounts/signup/`. That page stays open either way (so your page can link back to it), and people with a pending invite are always sent to it, since only it accepts the invite. |
+| `CUSTOM_SIGNUP_URL` | No | Where "Sign up" links point, e.g. a waitlist or marketing page: the login page's link, the email sent when someone resets the password of an address with no account, and the redirect after an owner deletes their organization. Must be an `http(s)://` URL or a path starting with `/`. Default: the built-in `/accounts/signup/`. With `SIGNUP_MODE=open` that page stays open either way (so your page can link back to it); with `invite` or `closed`, everyone who may not sign up is redirected here instead (see [Restricting Sign-up](#restricting-sign-up)). People with a pending invite are sent to the built-in signup, since only it accepts the invite (except with `closed`, where invites cannot create accounts). |
 | `UNSPLASH_ACCESS_KEY` | No | Enables Unsplash stock-photo search in the composer. Create a free app at [unsplash.com/developers](https://unsplash.com/developers). |
 
 For social media API keys, see [Platform Credentials](#platform-credentials). Full variable reference: `.env.example`.
@@ -330,7 +330,7 @@ who finds the domain can create an account. `SIGNUP_MODE` controls that:
 |---|---|
 | `open` (default) | Anyone. |
 | `invite` | Only visitors who followed a valid invitation link. |
-| `closed` | Nobody. Create accounts in the Django admin. |
+| `closed` | Nobody. Create accounts in the Django admin. Invitations can only be sent to people who already have an account. |
 
 ```bash
 SIGNUP_MODE=invite
@@ -347,6 +347,23 @@ signed up.
 In `invite` mode the invitation must be unaccepted and unexpired, so a
 single link cannot be reused indefinitely. Invitations are sent from
 **Settings → Members**.
+
+What a visitor who may not sign up sees depends on `CUSTOM_SIGNUP_URL`:
+
+- **Empty:** a "Sign-up is closed" page, and the login page hides its
+  "Sign up" link.
+- **Set** (e.g. `https://example.com/signup`): they are redirected there —
+  from `/accounts/signup/` and from the Google callback alike, before any
+  account is created — and the login page's "Sign up" link points there too.
+  In `invite` mode, visitors with a valid invitation still get the built-in
+  signup. Studio refuses to start if the URL points back at its own
+  `/accounts/signup/`, which would loop.
+
+Things to expect with a redirect: a new Google user goes through Google's
+consent screen before being redirected; someone whose Google email differs
+from the email of their existing account counts as new; and an invitee who
+opens the link in one browser and signs up in another has no invitation
+there.
 
 An unrecognised value stops the app at startup rather than falling back to
 a default — a typo that silently leaves sign-up open is the failure worth

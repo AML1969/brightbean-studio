@@ -12,7 +12,7 @@ from django.shortcuts import redirect, render
 from django.utils import timezone as django_tz
 from django.views.decorators.http import require_http_methods
 
-from apps.accounts.signup_links import custom_signup_url
+from apps.accounts.signup_links import custom_signup_url, signup_allowed
 from apps.common.validators import clean_display_name
 from apps.composer.models import PlatformPost, Post, Tag
 from apps.members.decorators import require_org_role
@@ -188,7 +188,9 @@ def _handle_immediate_org_deletion(request, org):
 
     org.hard_delete(requesting_user=request.user)
     logout(request)
-    return redirect(custom_signup_url(request) or "account_signup")
+    # With SIGNUP_MODE invite/closed and no custom URL, the signup page would only
+    # say sign-up is closed, so send them to log in instead.
+    return redirect(custom_signup_url(request) or ("account_signup" if signup_allowed(request) else "account_login"))
 
 
 def _handle_cancel_deletion(request, org):

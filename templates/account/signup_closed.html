@@ -17,7 +17,10 @@
         </h1>
         <p class="text-sm mt-1" style="color: var(--text-secondary);">
             {% signup_mode as mode %}
-            {% if mode == "invite" %}
+            {% invite_lapsed as lapsed %}
+            {% if mode == "invite" and lapsed %}
+            {% trans "Your invitation has expired or was already used. Ask the person who invited you to send a new one." %}
+            {% elif mode == "invite" %}
             {% trans "New accounts need an invitation. If you have one, open the invitation link in this browser, then sign up." %}
             {% else %}
             {% trans "This installation does not accept new accounts. Ask an administrator to create one for you." %}

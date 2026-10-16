@@ -21,6 +21,14 @@ def signup_allowed(context):
     return _signup_allowed(context.get("request"))
 
 
+@register.simple_tag
+def signup_mode():
+    """The configured SIGNUP_MODE, so the closed-signup notice can say why."""
+    from django.conf import settings
+
+    return settings.SIGNUP_MODE
+
+
 @register.filter(is_safe=True)
 def json_attr(value):
     """Serialize a Python value as a JSON literal safe to embed inside an

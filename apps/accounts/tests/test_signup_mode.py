@@ -148,6 +148,13 @@ class TestExistingUsersAreUnaffected:
         settings.SIGNUP_MODE = "closed"
         response = client.get(reverse("account_signup"))
         assert b"Sign-up is closed" in response.content
+        assert b"Ask an administrator to create one" in response.content
+
+    def test_invite_mode_notice_points_at_the_invitation_link(self, settings, client):
+        settings.SIGNUP_MODE = "invite"
+        response = client.get(reverse("account_signup"))
+        assert b"Sign-up is closed" in response.content
+        assert b"open the invitation link in this browser" in response.content
 
 
 @pytest.mark.django_db

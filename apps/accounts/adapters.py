@@ -1,66 +1,69 @@
 from allauth.account.adapter import DefaultAccountAdapter
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
+from allauth.utils import build_absolute_uri
 from django.conf import settings
 
 from apps.accounts.models import OAuthConnection
-
-
-def pending_invitation(request):
-    """The unaccepted, unexpired Invitation this visitor arrived with, if any.
-
-    The token is put into the session by the invitation link (see
-    apps.members.views) and consumed after signup by apps.accounts.signals.
-    """
-    if request is None:
-        return None
-    session = getattr(request, "session", None)
-    if session is None:
-        return None
-    token = session.get("pending_invite_token")
-    if not token:
-        return None
-
-    from apps.members.models import Invitation
-
-    invitation = Invitation.objects.filter(token=token, accepted_at__isnull=True).first()
-    if invitation is None or invitation.is_expired:
-        return None
-    return invitation
+from apps.accounts.signup_links import custom_signup_url, pending_invite_email
+from apps.common.mail import transactional
 
 
 def signup_allowed(request):
-    """Whether a brand-new account may be created for this request.
+    """Whether a brand-new account may be created for this request, per ``SIGNUP_MODE``.
 
     Only ever asked when an account would actually be created. Signing in
     with an existing account — including a social login that connects to an
-    existing user by email — does not pass through here.
+    existing user by email — does not pass through here. In invite mode the
+    visitor must carry a still-open invitation (see ``pending_invite_email``).
     """
-    mode = getattr(settings, "SIGNUP_MODE", "open")
+    mode = settings.SIGNUP_MODE
     if mode == "open":
         return True
     if mode == "closed":
         return False
-    return pending_invitation(request) is not None
+    return pending_invite_email(request) is not None
 
 
 class AccountAdapter(DefaultAccountAdapter):
-    """Applies SIGNUP_MODE to the email/password signup form."""
+    """Marks allauth's own mail as transactional and applies ``SIGNUP_MODE``.
+
+    Password resets, email confirmations and login codes are mail a person is
+    sitting in front of waiting for. Without this they would carry the default
+    ``notification`` class and be subject to the per-recipient cap in
+    ``apps.common.mail`` — so a user who had already received their allowance of
+    publish-failure notices that hour could not reset their own password. The
+    global daily cap still applies; nothing bypasses that.
+
+    ``render_mail`` is the single seam every allauth email passes through, so
+    overriding it here covers all of them without touching a template. It also
+    points any ``signup_url`` in the context (the unknown-account email sent on
+    a password reset for an address with no account) at ``CUSTOM_SIGNUP_URL``.
+
+    ``is_open_for_signup`` gates both doors: the email form, and social signups,
+    because ``DefaultSocialAccountAdapter.is_open_for_signup`` delegates here.
+    That matters since ``SOCIALACCOUNT_AUTO_SIGNUP`` creates the account during
+    the provider callback, without the signup page ever rendering.
+    """
 
     def is_open_for_signup(self, request):
         return signup_allowed(request)
 
+    def render_mail(self, template_prefix, email, context, headers=None):
+        if "signup_url" in context:
+            request = context.get("request")
+            custom = custom_signup_url(request)
+            if custom:
+                context = {**context, "signup_url": build_absolute_uri(request, custom)}
+        return super().render_mail(
+            template_prefix,
+            email,
+            context,
+            headers={**(headers or {}), **transactional()},
+        )
+
 
 class SocialAccountAdapter(DefaultSocialAccountAdapter):
     """Custom adapter that syncs Google social logins to OAuthConnection."""
-
-    def is_open_for_signup(self, request, sociallogin):
-        """Applies SIGNUP_MODE to social signups.
-
-        Without this, closing the email form would achieve nothing:
-        SOCIALACCOUNT_AUTO_SIGNUP creates the account during the provider
-        callback, so a new Google user never visits the signup page at all.
-        """
-        return signup_allowed(request)
 
     def populate_user(self, request, sociallogin, data):
         """Set user.name from Google profile (custom User model has 'name', not first/last)."""

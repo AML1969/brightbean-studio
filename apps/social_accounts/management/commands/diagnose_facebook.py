@@ -97,13 +97,13 @@ class Command(BaseCommand):
         self._check_local_state(account, check)
 
         try:
-            from apps.social_accounts.views import _apply_analytics_scope_flag, _get_provider_for_platform
+            from apps.social_accounts.provider_factory import _get_provider_for_platform, apply_analytics_scope_flag
 
             provider = _get_provider_for_platform("facebook", account.workspace.organization_id)
             # Mirror what the OAuth flow does, or required_scopes reports
             # read_insights as expected on a deployment where analytics is
             # deliberately off — and a healthy token gets reported as broken.
-            _apply_analytics_scope_flag(provider, "facebook")
+            apply_analytics_scope_flag(provider, "facebook")
         except Exception as exc:
             check("provider", False, f"could not build the Facebook provider: {exc}")
             return report
@@ -137,7 +137,11 @@ class Command(BaseCommand):
         check(
             "webhook subscription (local record)",
             account.webhooks_active is not False,
-            account.webhook_error or f"webhooks_active={account.webhooks_active}",
+            # webhook_error is rewritten for the account card and says nothing
+            # an operator can act on; webhook_error_detail keeps the platform's
+            # own words (error code, fbtrace_id), which is the point of this
+            # command.
+            account.webhook_error_detail or account.webhook_error or f"webhooks_active={account.webhooks_active}",
         )
         check(
             "FACEBOOK_WEBHOOK_VERIFY_TOKEN",
@@ -169,10 +173,10 @@ class Command(BaseCommand):
             check("granted permissions", True, f"all {len(provider.required_scopes)} required scopes granted")
 
     def _check_subscription(self, account, provider, check, *, subscribe: bool):
-        from apps.social_accounts.views import _webhook_target
+        from apps.social_accounts.webhooks import webhook_target
         from providers.facebook import FACEBOOK_WEBHOOK_FIELDS
 
-        target = _webhook_target(account)
+        target = webhook_target(account)
         try:
             subscriptions = provider.get_webhook_subscriptions(account.oauth_access_token, target)
         except Exception as exc:
@@ -200,9 +204,9 @@ class Command(BaseCommand):
             )
 
         if subscribe:
-            from apps.social_accounts.views import _subscribe_account_webhooks
+            from apps.social_accounts.webhooks import subscribe_account_webhooks
 
-            ok = _subscribe_account_webhooks(account)
+            ok = subscribe_account_webhooks(account)
             check("webhook subscription (repair)", ok, "subscribed" if ok else "the platform refused")
 
     def _check_comment_readability(self, account, provider, check) -> str:

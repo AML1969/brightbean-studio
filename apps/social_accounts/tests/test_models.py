@@ -1,11 +1,13 @@
 """Tests for social_accounts models."""
 
 from datetime import timedelta
+from unittest.mock import MagicMock
 
 import pytest
 from django.db import IntegrityError
 from django.utils import timezone
 
+from apps.credentials.models import PlatformCredential
 from apps.social_accounts.models import MastodonAppRegistration, SocialAccount
 
 
@@ -121,6 +123,49 @@ class TestSocialAccount:
         assert SocialAccount.objects.filter(pk=social_account.pk).count() == 0
 
 
+class TestDisconnectRevocation:
+    @pytest.mark.parametrize("platform", sorted(PlatformCredential.Platform.values))
+    def test_the_revocation_claim_matches_the_provider(self, platform):
+        """The disconnect confirmation promises revocation on these platforms,
+        so each one's provider must actually call out to revoke — and every
+        other provider must not, or the copy undersells what happens.
+
+        Bluesky is the one provider that calls out without revoking: its
+        ``deleteSession`` wants the refresh JWT, and the app password outlives
+        any session anyway."""
+        from providers import PROVIDER_REGISTRY
+
+        provider = PROVIDER_REGISTRY[platform](
+            {
+                "client_id": "id",
+                "client_secret": "secret",
+                "client_key": "key",
+                "instance_url": "https://mastodon.example",
+            }
+        )
+        provider._request = MagicMock()
+        provider.revoke_token("token")
+
+        account = SocialAccount(platform=platform)
+        calls_out = provider._request.called and platform != "bluesky"
+        assert account.revokes_platform_grant_on_disconnect is calls_out, platform
+        if calls_out:
+            assert not account.keeps_platform_grant_on_disconnect, platform
+
+    def test_youtube_revokes_with_the_refresh_token(self):
+        """Google refuses an expired access token, and ours lives an hour."""
+        account = SocialAccount(platform="youtube", oauth_access_token="access", oauth_refresh_token="refresh")
+        assert account.revocation_token == "refresh"
+
+    def test_youtube_falls_back_to_the_access_token(self):
+        account = SocialAccount(platform="youtube", oauth_access_token="access")
+        assert account.revocation_token == "access"
+
+    def test_other_platforms_revoke_with_the_access_token(self):
+        account = SocialAccount(platform="tiktok", oauth_access_token="access", oauth_refresh_token="refresh")
+        assert account.revocation_token == "access"
+
+
 @pytest.mark.django_db
 class TestMastodonAppRegistration:
     def test_create_registration(self, db):
@@ -161,3 +206,38 @@ class TestMastodonAppRegistration:
             client_secret="secret",
         )
         assert str(reg) == "https://mastodon.social"
+
+
+@pytest.mark.django_db
+class TestAnalyticsPlatformConfigEnabledPlatforms:
+    """``enabled_platforms`` decides which platforms the analytics stack serves."""
+
+    def test_platform_without_a_row_counts_as_enabled(self):
+        """The seed migration enumerated the choices as of its own migration, so
+        every slug added afterwards (``devto`` was the first) has no row. Reading
+        that as "disabled" switched analytics off for them silently — and
+        invisibly, since a platform with no row isn't listed in the admin either.
+        """
+        from apps.credentials.models import PlatformCredential
+        from apps.social_accounts.models import AnalyticsPlatformConfig
+
+        AnalyticsPlatformConfig.objects.filter(platform=PlatformCredential.Platform.DEVTO).delete()
+
+        assert PlatformCredential.Platform.DEVTO in AnalyticsPlatformConfig.enabled_platforms()
+
+    def test_disabled_row_is_honored(self):
+        from apps.social_accounts.models import AnalyticsPlatformConfig
+
+        AnalyticsPlatformConfig.objects.update_or_create(platform="instagram_login", defaults={"is_enabled": False})
+
+        assert "instagram_login" not in AnalyticsPlatformConfig.enabled_platforms()
+
+    def test_stale_slug_row_does_not_leak_into_the_result(self):
+        """``instagram_personal`` was renamed to ``instagram_login``; a row left
+        behind by a partially-applied rename must not appear as a platform.
+        """
+        from apps.social_accounts.models import AnalyticsPlatformConfig
+
+        AnalyticsPlatformConfig.objects.create(platform="instagram_personal", is_enabled=True)
+
+        assert "instagram_personal" not in AnalyticsPlatformConfig.enabled_platforms()

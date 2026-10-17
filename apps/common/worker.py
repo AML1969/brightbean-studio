@@ -25,6 +25,11 @@ PUBLISHING_TASK_NAMES = frozenset(
 )
 WORKER_EXECUTION_THREADS = 2
 
+# Set when the process receives SIGINT/SIGTERM. In-flight work may read it to
+# cut a long wait short and leave the job retryable, rather than be killed when
+# the platform's shutdown grace period (30s on Heroku) runs out.
+SHUTDOWN_REQUESTED = threading.Event()
+
 
 class StudioWorker:
     """Claim at most one task per lane; never queue work behind a busy slot."""

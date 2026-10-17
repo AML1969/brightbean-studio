@@ -92,7 +92,7 @@ INSTAGRAM_MEDIA_FIELDS = [
 
 # Polling settings for container status checks
 CONTAINER_POLL_INTERVAL = 2  # seconds
-CONTAINER_POLL_MAX_ATTEMPTS = 60
+CONTAINER_POLL_TIMEOUT = 120  # seconds
 
 
 class InstagramProvider(SocialProvider):
@@ -425,7 +425,8 @@ class InstagramProvider(SocialProvider):
 
     def _wait_for_container(self, access_token: str, container_id: str) -> None:
         """Poll container status until FINISHED or error."""
-        for _ in range(CONTAINER_POLL_MAX_ATTEMPTS):
+
+        def finished() -> bool:
             resp = self._request(
                 "GET",
                 f"{BASE_URL}/{container_id}",
@@ -434,21 +435,19 @@ class InstagramProvider(SocialProvider):
             )
             data = resp.json()
             status = data.get("status_code", "")
-
-            if status == "FINISHED":
-                return
             if status == "ERROR":
                 raise PublishError(
                     f"Instagram container failed: {data.get('status', 'unknown error')}",
                     platform=self.platform_name,
                     raw_response=data,
                 )
+            return status == "FINISHED"
 
-            time.sleep(CONTAINER_POLL_INTERVAL)
-
-        raise PublishError(
-            "Instagram container processing timed out",
-            platform=self.platform_name,
+        self._poll_until(
+            finished,
+            deadline=time.monotonic() + CONTAINER_POLL_TIMEOUT,
+            interval=CONTAINER_POLL_INTERVAL,
+            on_timeout=lambda: PublishError("Instagram container processing timed out", platform=self.platform_name),
         )
 
     def _publish_container(self, access_token: str, ig_user_id: str, container_id: str) -> PublishResult:

@@ -6,7 +6,7 @@ import signal
 from background_task.tasks import autodiscover
 from django.core.management.base import BaseCommand, CommandError
 
-from apps.common.worker import StudioWorker
+from apps.common.worker import SHUTDOWN_REQUESTED, StudioWorker
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +35,12 @@ class Command(BaseCommand):
             logger.info("Removed %s duplicate pending analytics backfills", deleted)
 
         worker = StudioWorker(duration=options["duration"], poll_interval=options["sleep"])
+        SHUTDOWN_REQUESTED.clear()
         previous_handlers = {}
 
         def stop(signum, frame):
             logger.info("Studio worker received signal=%s; stopping task admission", signum)
+            SHUTDOWN_REQUESTED.set()
             worker.request_stop()
 
         try:
@@ -46,5 +48,9 @@ class Command(BaseCommand):
                 previous_handlers[signum] = signal.signal(signum, stop)
             worker.run()
         finally:
+            # run() returns only once in-flight work has finished, so nothing
+            # is left to read this; clearing it keeps the process-wide flag
+            # from outliving the worker that set it.
+            SHUTDOWN_REQUESTED.clear()
             for signum, handler in previous_handlers.items():
                 signal.signal(signum, handler)

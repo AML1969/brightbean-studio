@@ -168,6 +168,31 @@ class DispatchExtraInjectionTest(SimpleTestCase):
 
     @patch("apps.publisher.engine.get_provider")
     @patch("apps.publisher.engine._resolve_publish_credentials", return_value={})
+    def test_passes_a_stable_idempotency_key_and_publish_runtime(self, _mock_creds, mock_get_provider):
+        from apps.common.worker import SHUTDOWN_REQUESTED
+        from apps.publisher.engine import _provider_upload_cache
+
+        engine, platform_post, mock_provider = _build_dispatch_mocks(
+            platform="mastodon",
+            account_platform_id="109",
+        )
+        platform_post.id = "4f1c"
+        mock_get_provider.return_value = mock_provider
+
+        engine._dispatch_to_provider(platform_post)
+        engine._dispatch_to_provider(platform_post)
+
+        contents = [call.args[1] for call in mock_provider.publish_post.call_args_list]
+        # Every retry of the row must send the same key, or the platform cannot
+        # recognise a repeat of a post it already created.
+        self.assertEqual([c.idempotency_key for c in contents], ["brightbean-4f1c", "brightbean-4f1c"])
+        # A typed field, not a key smuggled into the authored extras.
+        self.assertNotIn("idempotency_key", contents[0].extra)
+        self.assertIs(contents[0].upload_cache, _provider_upload_cache)
+        self.assertEqual(contents[0].should_stop, SHUTDOWN_REQUESTED.is_set)
+
+    @patch("apps.publisher.engine.get_provider")
+    @patch("apps.publisher.engine._resolve_publish_credentials", return_value={})
     def test_does_not_overwrite_explicit_author(self, _mock_creds, mock_get_provider):
         # When the caller has already set extra["author"], the engine must not
         # overwrite it — important for callers that pass a different URN.
@@ -827,3 +852,22 @@ class MediaTypePropagationTest(SimpleTestCase):
         self.assertEqual(len(content.media_types), len(content.media_urls))
         self.assertEqual(content.media_types, ["video"])
         self.assertTrue(content.is_video(0))
+
+
+class ProviderUploadCacheTest(SimpleTestCase):
+    def test_round_trips_through_the_default_cache(self):
+        from apps.publisher.engine import _provider_upload_cache
+
+        _provider_upload_cache.set("mastodon-media:a:b", "m1", 60)
+
+        self.assertEqual(_provider_upload_cache.get("mastodon-media:a:b"), "m1")
+
+    @patch("apps.publisher.engine.cache")
+    def test_cache_outage_costs_a_reupload_not_a_publish(self, mock_cache):
+        from apps.publisher.engine import _provider_upload_cache
+
+        mock_cache.get.side_effect = ConnectionError("redis down")
+        mock_cache.set.side_effect = ConnectionError("redis down")
+
+        self.assertIsNone(_provider_upload_cache.get("k"))
+        _provider_upload_cache.set("k", "v", 60)

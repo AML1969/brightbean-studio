@@ -15,7 +15,7 @@ from django.core.management.base import CommandError
 from django.db import connections
 from django.utils import timezone
 
-from apps.common.worker import PUBLISHING_TASK_NAMES, StudioWorker
+from apps.common.worker import PUBLISHING_TASK_NAMES, SHUTDOWN_REQUESTED, StudioWorker
 
 pytestmark = pytest.mark.django_db(transaction=True)
 PUBLISH = "apps.publisher.tasks.run_publish_cycle"
@@ -268,10 +268,13 @@ def test_command_installs_and_restores_termination_handlers(registry):
     def terminate(worker):
         signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
         assert worker.stop_requested.is_set()
+        # In-flight publishes read this to cut long waits short.
+        assert SHUTDOWN_REQUESTED.is_set()
 
     with patch.object(StudioWorker, "run", autospec=True, side_effect=terminate):
         call_command("run_studio_worker", duration=3600)
     assert {signum: signal.getsignal(signum) for signum in before} == before
+    assert not SHUTDOWN_REQUESTED.is_set()
     from background_task.tasks import tasks
 
     assert "apps.publisher.engine._post_first_comment_task" in tasks._tasks

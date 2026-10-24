@@ -754,16 +754,19 @@
                 <div class="sidebar-section-label">Connect channels</div>
                 {% for platform_key, platform_label in sidebar_connectable_platforms|slice:":3" %}
                 <a href="{% url 'social_accounts:connect' workspace_id=request.workspace.id %}" class="sidebar-nav-item">
-                    {% if platform_key != 'youtube' %}
                     <div class="relative flex-shrink-0">
                         <div class="w-4 h-4 flex items-center justify-center rounded-lg bg-stone-100">
+                            {% if platform_key == 'youtube' %}
+                            {# Same generic video glyph as the connect page: no YouTube logo at this size (policy III.F.2.a). #}
+                            <svg class="w-3.5 h-3.5 text-stone-700" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.75" d="M15.75 10.5l4.72-4.72a.75.75 0 011.28.53v11.38a.75.75 0 01-1.28.53l-4.72-4.72M4.5 18.75h9a2.25 2.25 0 002.25-2.25v-9a2.25 2.25 0 00-2.25-2.25h-9A2.25 2.25 0 002.25 7.5v9a2.25 2.25 0 002.25 2.25z"/></svg>
+                            {% else %}
                             {% include "partials/_platform_icon.html" with platform=platform_key size="sm" %}
+                            {% endif %}
                         </div>
                         <div class="absolute -bottom-1 -right-1 w-2.5 h-2.5 rounded-full bg-orange-500 flex items-center justify-center ring-1 ring-white">
                             <svg viewBox="0 0 24 24" fill="none" width="6" height="6" stroke="white" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12H19M12 5V19"/></svg>
                         </div>
                     </div>
-                    {% endif %}
                     <span class="sidebar-nav-label">{{ platform_label }}</span>
                 </a>
                 {% endfor %}

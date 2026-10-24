@@ -19,6 +19,7 @@ from apps.workspaces.models import Workspace
 
 ICON_SLOT = '<div class="relative flex-shrink-0">'
 VIDEO_GLYPH = 'd="M15.75 10.5l4.72-4.72'
+PLUS_BADGE = '<div class="absolute -bottom-1 -right-1 w-2.5 h-2.5 rounded-full bg-orange-500'
 
 
 class SidebarConnectChannelsTests(TestCase):
@@ -59,6 +60,7 @@ class SidebarConnectChannelsTests(TestCase):
         self.assertIn("YouTube", rows)
         for label, row in rows.items():
             self.assertIn(ICON_SLOT, row, label)
+            self.assertIn(PLUS_BADGE, row, label)
         self.assertIn(VIDEO_GLYPH, rows["YouTube"])
         self.assertNotIn("youtube-label", rows["YouTube"])
         self.assertNotIn("icon-red.png", rows["YouTube"])

@@ -1,8 +1,8 @@
 """Sidebar "Connect channels" suggestions.
 
 Every suggestion row carries the same icon slot so the labels line up. YouTube's
-slot holds a neutral initial rather than the logo (policy III.F.2.a), including
-after the workspace's only YouTube channel was disconnected.
+slot holds the connect page's generic video glyph rather than the logo (policy
+III.F.2.a), including after the workspace's only YouTube channel was disconnected.
 """
 
 import re
@@ -18,6 +18,7 @@ from apps.social_accounts.models import PlatformVisibility, SocialAccount
 from apps.workspaces.models import Workspace
 
 ICON_SLOT = '<div class="relative flex-shrink-0">'
+VIDEO_GLYPH = 'd="M15.75 10.5l4.72-4.72'
 
 
 class SidebarConnectChannelsTests(TestCase):
@@ -58,5 +59,6 @@ class SidebarConnectChannelsTests(TestCase):
         self.assertIn("YouTube", rows)
         for label, row in rows.items():
             self.assertIn(ICON_SLOT, row, label)
+        self.assertIn(VIDEO_GLYPH, rows["YouTube"])
         self.assertNotIn("youtube-label", rows["YouTube"])
         self.assertNotIn("icon-red.png", rows["YouTube"])

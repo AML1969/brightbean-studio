@@ -147,6 +147,17 @@ def purge_organization(organization):
         purge_connection(account)
 
 
+class ChannelNotAuthorizedError(APIError):
+    """The grant works, but no longer reaches the connected channel.
+
+    Distinct from a transient failure: the inbox polls the stored channel id
+    directly, so this check is the only thing tying those polls to a channel
+    the grant can still see. Left CONNECTED, the account would keep reading a
+    deleted channel's errors — or a public channel's comments — until the
+    29-day purge.
+    """
+
+
 def _grant_and_profile(account, provider):
     """Verify the stored grant; never require a migration-related reconnect."""
     token = account.oauth_access_token
@@ -160,8 +171,18 @@ def _grant_and_profile(account, provider):
         token = account.refresh_oauth_token(provider, enqueue_backfill=False)
         profile = provider.get_profile(token, channel_id=account.account_platform_id)
     if profile.platform_id != account.account_platform_id:
-        raise APIError("The connected channel was not returned by the authorization check", platform="youtube")
+        raise ChannelNotAuthorizedError(
+            "The connected channel was not returned by the authorization check", platform="youtube"
+        )
     return token, profile
+
+
+def _mark_channel_unavailable(account) -> None:
+    from .error_messages import CHANNEL_UNAVAILABLE_MESSAGE
+
+    SocialAccount.objects.filter(pk=account.pk, youtube_data_generation=account.youtube_data_generation).exclude(
+        connection_status=SocialAccount.ConnectionStatus.DISCONNECTED
+    ).update(connection_status=SocialAccount.ConnectionStatus.ERROR, last_error=CHANNEL_UNAVAILABLE_MESSAGE)
 
 
 def _delete_expired(account, now):
@@ -370,6 +391,8 @@ def check_connection(account, *, provider=None, now=None, enforce=True):
             return
         if isinstance(exc, QuotaExceededError) and provider is not None:
             quota.trip_from_exception("youtube", quota.credential_key(provider.credentials), exc)
+        if isinstance(exc, ChannelNotAuthorizedError):
+            _mark_channel_unavailable(account)
         logger.warning("YouTube verification deferred for %s (%s)", account.pk, type(exc).__name__)
     # A failed attempt is never a successful verification timestamp.
     if not enforce:

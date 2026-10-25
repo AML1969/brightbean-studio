@@ -22,6 +22,9 @@ from providers.exceptions import (
 )
 
 RECONNECT_MESSAGE = "Account connection expired. Please reconnect."
+CHANNEL_UNAVAILABLE_MESSAGE = (
+    "This YouTube channel is no longer available to the connected Google account. Please reconnect."
+)
 RATE_LIMIT_MESSAGE = "Rate limit reached. We'll retry this check shortly."
 # A spent daily budget is not the rate limit above, and must not borrow its
 # copy: "shortly" can be twenty hours away. YouTube's Data API quota, the one

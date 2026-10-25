@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode, urlsplit
 
@@ -450,6 +451,8 @@ class YouTubeProvider(SocialProvider):
         *,
         deep: bool = False,
         page_token: str | None = None,
+        channel_id: str | None = None,
+        stored_reply_counts: Callable[[list[str]], Mapping[str, int]] | None = None,
     ) -> YouTubeMessageBatch:
         """Comment threads on this channel, newest first.
 
@@ -480,25 +483,38 @@ class YouTubeProvider(SocialProvider):
         whose top-level comment predates ``since`` can still carry a reply
         posted seconds ago, so skipping the whole thread — as this did — lost
         the reply with it.
+
+        ``channel_id`` is the channel stored at connect time. Passing it skips
+        the ``channels.list`` lookup, which was half of every routine poll's
+        cost for an answer that never changes. Without it the lookup still
+        runs, for a row that predates the stored id.
+
+        ``stored_reply_counts`` is asked, once per page, how many replies are
+        already stored for the threads on that page that YouTube only partly
+        embeds. A history walk otherwise fetches every reply page of every such
+        thread, even one the previous sweep imported in full. A thread is
+        skipped only when the stored count *equals* ``totalReplyCount``: a
+        higher stored count means replies were deleted upstream and may hide a
+        new one, so it is fetched. Embedded replies are always read.
         """
-        # Counted before the call, not after, so a request that raises still
-        # shows up in the tally — and counted with ``+=`` so an auth retry adds
-        # to what the first attempt bought instead of replacing it. A refusal on
-        # quota is not charged upstream, so this is a ceiling on the real spend,
-        # which is the safe direction to be wrong in. See
-        # SocialProvider.last_call_quota_units.
-        self.last_call_quota_units += 1
-        # Resolve channel ID
-        ch_resp = self._request(
-            "GET",
-            f"{API_BASE}/channels",
-            access_token=access_token,
-            params={"part": "id", "mine": "true"},
-        )
-        ch_items = ch_resp.json().get("items", [])
-        if not ch_items:
-            return YouTubeMessageBatch([])
-        channel_id = ch_items[0]["id"]
+        if not channel_id:
+            # Counted before the call, not after, so a request that raises
+            # still shows up in the tally — and counted with ``+=`` so an auth
+            # retry adds to what the first attempt bought instead of replacing
+            # it. A refusal on quota is not charged upstream, so this is a
+            # ceiling on the real spend, which is the safe direction to be
+            # wrong in. See SocialProvider.last_call_quota_units.
+            self.last_call_quota_units += 1
+            ch_resp = self._request(
+                "GET",
+                f"{API_BASE}/channels",
+                access_token=access_token,
+                params={"part": "id", "mine": "true"},
+            )
+            ch_items = ch_resp.json().get("items", [])
+            if not ch_items:
+                return YouTubeMessageBatch([])
+            channel_id = ch_items[0]["id"]
 
         # How far back a page may reach before paging stops. ``None`` means "no
         # floor" — a first sync (no ``since``) and the deep sweep both want the
@@ -536,6 +552,18 @@ class YouTubeProvider(SocialProvider):
             # page reached.
             oldest_on_page: datetime | None = None
 
+            # Threads YouTube only partly embedded. Looked up per page so a
+            # walk capped at a few pages never loads the whole history's counts.
+            stored_counts: Mapping[str, int] = {}
+            if (deep or since is None) and stored_reply_counts is not None:
+                partial = [
+                    thread["snippet"]["topLevelComment"]["id"]
+                    for thread in body.get("items", [])
+                    if thread["snippet"].get("totalReplyCount", 0) > len(thread.get("replies", {}).get("comments", []))
+                ]
+                if partial:
+                    stored_counts = stored_reply_counts(partial)
+
             for thread in body.get("items", []):
                 top_snippet = thread["snippet"]["topLevelComment"]["snippet"]
                 published = datetime.fromisoformat(top_snippet["publishedAt"].replace("Z", "+00:00"))
@@ -566,7 +594,9 @@ class YouTubeProvider(SocialProvider):
                 # A full history walk must fetch the rest or its new replies to
                 # old threads can remain invisible despite reaching the thread.
                 replies = thread.get("replies", {}).get("comments", [])
-                if (deep or since is None) and thread["snippet"].get("totalReplyCount", 0) > len(replies):
+                total_replies = thread["snippet"].get("totalReplyCount", 0)
+                already_stored = stored_counts.get(top_comment_id) == total_replies
+                if (deep or since is None) and total_replies > len(replies) and not already_stored:
                     replies = self._all_comment_replies(access_token, top_comment_id)
                 for reply in replies:
                     r_snippet = reply["snippet"]

@@ -623,6 +623,130 @@ class TestBatching:
 
 
 @pytest.mark.django_db
+class TestBatchFill:
+    """A call that is going out anyway carries the posts due next, for no extra unit."""
+
+    def _post(self, account, platform_post_id, *, age, attempted_ago=None, failures=0):
+        from apps.composer.models import PlatformPost
+
+        post = _published_post(account, age=age, platform_post_id=platform_post_id)
+        if attempted_ago is not None or failures:
+            PlatformPost.objects.filter(pk=post.pk).update(
+                analytics_attempted_at=timezone.now() - attempted_ago if attempted_ago is not None else None,
+                analytics_failure_count=failures,
+            )
+        return post
+
+    def _sync(self, account, provider):
+        from apps.analytics.tasks import _sync_one_account
+
+        # ``needs_reconnect`` accounts skip the channel reports, leaving only the post sweep.
+        with patch("apps.analytics.tasks._analytics_provider_and_token", return_value=(provider, "tok")):
+            _sync_one_account(account, timezone.now().date(), timezone.now(), cache={})
+
+    def _batch_provider(self):
+        from providers.types import PostMetrics
+
+        provider = _provider(batch_size=50)
+        provider.get_post_metrics_batch.side_effect = lambda _tok, ids: {i: PostMetrics(video_views=1) for i in ids}
+        return provider
+
+    def test_not_yet_due_posts_ride_along_with_a_due_one(self, workspace):
+        from apps.composer.models import PlatformPost
+
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        self._post(account, "new", age=timedelta(hours=2))
+        # Each at least halfway to due on its own rung.
+        self._post(account, "six-hourly", age=timedelta(days=3), attempted_ago=timedelta(hours=4))
+        self._post(account, "daily", age=timedelta(days=10), attempted_ago=timedelta(hours=13))
+        self._post(account, "weekly", age=timedelta(days=40), attempted_ago=timedelta(days=4))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        assert provider.get_post_metrics_batch.call_count == 1
+        sent = provider.get_post_metrics_batch.call_args.args[1]
+        assert sent[0] == "new"
+        assert set(sent) == {"new", "six-hourly", "daily", "weekly"}
+        cutoff = timezone.now() - timedelta(minutes=1)
+        assert all(p.analytics_attempted_at > cutoff for p in PlatformPost.objects.filter(social_account=account))
+
+    def test_failing_and_out_of_window_posts_stay_out(self, workspace):
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        self._post(account, "new", age=timedelta(hours=2))
+        self._post(account, "failing", age=timedelta(days=3), attempted_ago=timedelta(hours=2), failures=1)
+        self._post(account, "ancient", age=timedelta(days=120), attempted_ago=timedelta(days=30))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        assert provider.get_post_metrics_batch.call_args.args[1] == ["new"]
+
+    def test_only_empty_slots_are_filled_soonest_due_first(self, workspace):
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        for i in range(49):
+            self._post(account, f"due-{i}", age=timedelta(hours=2))
+        # Six-hourly rung, both past halfway: due in 1h vs due in 2h.
+        self._post(account, "sooner", age=timedelta(days=3), attempted_ago=timedelta(hours=5))
+        self._post(account, "later", age=timedelta(days=3), attempted_ago=timedelta(hours=4))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        assert provider.get_post_metrics_batch.call_count == 1
+        sent = provider.get_post_metrics_batch.call_args.args[1]
+        assert len(sent) == 50
+        assert "sooner" in sent
+        assert "later" not in sent
+
+    def test_posts_short_of_halfway_to_due_stay_out(self, workspace):
+        """Otherwise one hourly post would rewrite the whole catalogue's snapshots every tick."""
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        self._post(account, "new", age=timedelta(hours=2))
+        self._post(account, "six-hourly", age=timedelta(days=3), attempted_ago=timedelta(hours=2))
+        self._post(account, "weekly", age=timedelta(days=40), attempted_ago=timedelta(days=3))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        assert provider.get_post_metrics_batch.call_args.args[1] == ["new"]
+
+    def test_a_full_last_chunk_gets_nothing_added(self, workspace):
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        for i in range(50):
+            self._post(account, f"due-{i}", age=timedelta(hours=2))
+        self._post(account, "not-due", age=timedelta(days=3), attempted_ago=timedelta(hours=5))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        assert provider.get_post_metrics_batch.call_count == 1
+        assert "not-due" not in provider.get_post_metrics_batch.call_args.args[1]
+
+    def test_nothing_due_means_no_call(self, workspace):
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        self._post(account, "six-hourly", age=timedelta(days=3), attempted_ago=timedelta(hours=2))
+        provider = self._batch_provider()
+
+        self._sync(account, provider)
+
+        provider.get_post_metrics_batch.assert_not_called()
+
+    def test_unbatched_platforms_send_only_what_is_due(self, workspace):
+        from providers.types import PostMetrics
+
+        account = _youtube_account(workspace, platform_id="yt-fill", needs_reconnect=True)
+        self._post(account, "new", age=timedelta(hours=2))
+        self._post(account, "six-hourly", age=timedelta(days=3), attempted_ago=timedelta(hours=2))
+        provider = _provider(batch_size=1)
+        provider.get_post_metrics.return_value = PostMetrics(video_views=1)
+
+        self._sync(account, provider)
+
+        assert [c.args[1] for c in provider.get_post_metrics.call_args_list] == ["new"]
+
+
+@pytest.mark.django_db
 class TestQuotaBreaker:
     """Once the platform says "budget spent", every further call is waste."""
 

@@ -663,6 +663,20 @@ class TestGetMessages:
         assert YouTubeProvider().get_messages("tok") == []
         assert mock_request.call_count == 1
 
+    @patch.object(YouTubeProvider, "_request")
+    def test_a_stored_channel_id_skips_the_lookup(self, mock_request):
+        """Half of every routine poll's cost was this lookup of a value that never changes."""
+        mock_request.side_effect = [_make_response(_page([_thread("a", self.NOW)]))]
+        provider = YouTubeProvider()
+
+        messages = provider.get_messages("tok", since=self.NOW - timedelta(minutes=30), channel_id="UC_stored")
+
+        assert [m.platform_message_id for m in messages] == ["a"]
+        assert mock_request.call_count == 1
+        assert mock_request.call_args.args[1].endswith("/commentThreads")
+        assert mock_request.call_args.kwargs["params"]["allThreadsRelatedToChannelId"] == "UC_stored"
+        assert provider.last_call_quota_units == 1
+
 
 class TestDeepSweepBounds:
     """``deep=True`` raises the ceiling; it must not remove it.
@@ -723,6 +737,70 @@ class TestDeepSweepBounds:
         assert mock_request.call_args_list[2].kwargs["params"]["parentId"] == "old"
         assert mock_request.call_args_list[3].kwargs["params"]["pageToken"] == "reply-page-2"
         assert provider.last_call_quota_units == 4
+
+    def _partly_embedded_thread(self) -> dict:
+        thread = _thread("old", self.NOW - timedelta(days=40), replies=[("embedded", self.NOW - timedelta(days=1))])
+        thread["snippet"]["totalReplyCount"] = 3
+        return thread
+
+    @patch.object(YouTubeProvider, "_request")
+    def test_deep_sweep_skips_replies_the_inbox_already_holds(self, mock_request):
+        fully_embedded = _thread("whole", self.NOW - timedelta(days=30), replies=[("r", self.NOW - timedelta(days=2))])
+        fully_embedded["snippet"]["totalReplyCount"] = 1
+        mock_request.side_effect = [_make_response(_page([self._partly_embedded_thread(), fully_embedded]))]
+        asked: list[list[str]] = []
+
+        def stored(ids):
+            asked.append(ids)
+            return {"old": 3}
+
+        provider = YouTubeProvider()
+        batch = provider.get_messages(
+            "tok",
+            since=self.NOW - timedelta(days=7),
+            deep=True,
+            channel_id="UC_test",
+            stored_reply_counts=stored,
+        )
+
+        # Only the thread page: no ``comments.list`` walk. Embedded replies are still read.
+        assert mock_request.call_count == 1
+        assert [msg.platform_message_id for msg in batch] == ["embedded", "r"]
+        assert provider.last_call_quota_units == 1
+        # Asked once per page, and only about the partly embedded thread.
+        assert asked == [["old"]]
+
+    @pytest.mark.parametrize("stored_count", [2, 4], ids=["count-grew", "deleted-upstream"])
+    @patch.object(YouTubeProvider, "_request")
+    def test_deep_sweep_fetches_replies_unless_the_count_matches_exactly(self, mock_request, stored_count):
+        """A stored count above the total means deletions upstream, which can hide a new reply."""
+        mock_request.side_effect = [
+            _make_response(_page([self._partly_embedded_thread()])),
+            _make_response({"items": []}),
+        ]
+
+        YouTubeProvider().get_messages(
+            "tok",
+            since=self.NOW - timedelta(days=7),
+            deep=True,
+            channel_id="UC_test",
+            stored_reply_counts=lambda ids: {"old": stored_count},
+        )
+
+        assert mock_request.call_count == 2
+        assert mock_request.call_args_list[1].kwargs["params"]["parentId"] == "old"
+
+    @patch.object(YouTubeProvider, "_request")
+    def test_routine_poll_never_asks_for_stored_counts(self, mock_request):
+        mock_request.side_effect = [_make_response(_page([self._partly_embedded_thread()]))]
+        stored = MagicMock(return_value={})
+
+        YouTubeProvider().get_messages(
+            "tok", since=self.NOW - timedelta(minutes=30), channel_id="UC_test", stored_reply_counts=stored
+        )
+
+        stored.assert_not_called()
+        assert mock_request.call_count == 1
 
 
 class TestQuotaUnitAccounting:

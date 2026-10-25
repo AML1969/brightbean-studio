@@ -988,7 +988,7 @@ def _sync_account_posts(
     if not posts:
         return 0, 0, 0
 
-    batch_size = max(1, getattr(provider, "post_metrics_batch_size", 1))
+    batch_size = _post_batch_size(provider)
     if batch_size == 1:
         return _sync_account_posts_individually(
             account,
@@ -1187,6 +1187,13 @@ def _mark_needs_reconnect(account):
     account.save(update_fields=["analytics_needs_reconnect", "updated_at"])
 
 
+def _post_sync_wait(post, cadence: timedelta) -> timedelta:
+    """How long after an attempt ``post`` next comes due: its rung, or its backoff if longer."""
+    if post.analytics_failure_count:
+        return max(cadence, _analytics_failure_backoff(post.analytics_failure_count))
+    return cadence
+
+
 def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
     """Decide whether ``post`` is due for a new per-post metrics fetch.
 
@@ -1223,10 +1230,7 @@ def _post_cadence_due(post, now=None, *, platform: str | None = None) -> bool:
 
     attempted = post.analytics_attempted_at
     if attempted is not None:
-        wait = cadence
-        if post.analytics_failure_count:
-            wait = max(cadence, _analytics_failure_backoff(post.analytics_failure_count))
-        return (now - attempted) >= wait
+        return (now - attempted) >= _post_sync_wait(post, cadence)
 
     from .models import PostInsightsSnapshot
 
@@ -1285,6 +1289,54 @@ def _due_posts_for(account, now):
         )
         .order_by(F("analytics_attempted_at").asc(nulls_first=True))
     )
+
+
+def _fill_post_batch(due, candidates, *, batch_size: int, now):
+    """Top up the last chunk of ``due`` with the posts that come due next.
+
+    A batched endpoint charges per call, not per id — ``videos.list`` costs the
+    same single unit for one id as for fifty. Sending only what is due left
+    those slots empty, so a channel's 6-hourly, daily and weekly posts each
+    bought a call of their own at a different hour. Riding along refreshes them
+    early for nothing and stamps them, which is what retires those later calls.
+
+    Only empty slots are filled, so the number of calls never grows, and only
+    when something is already due: a tick with nothing due still spends nothing.
+    A post rides along only once it is at least halfway to due, so a channel
+    with an hourly post refreshes its weekly ones about twice a week rather
+    than every hour — the quota saving without rewriting a whole catalogue's
+    snapshots on every tick. Posts on a failure streak stay out — their backoff
+    is a decision about them, not about how full a request is — and posts never
+    attempted are already in ``due``. Extras go after ``due`` so the
+    nulls-first resume order of a pass cut short by the deadline is unchanged.
+    """
+    if not due or batch_size <= 1:
+        return due
+    free = (-len(due)) % batch_size
+    if not free:
+        return due
+
+    due_ids = {p.pk for p in due}
+    upcoming = []
+    for post in candidates:
+        attempted = post.analytics_attempted_at
+        if post.pk in due_ids or post.analytics_failure_count or attempted is None:
+            continue
+        # ``_due_posts_for`` guarantees ``published_at``; its window is inclusive,
+        # so a post exactly at the horizon can still have no rung.
+        cadence = post_sync_interval(now - post.published_at)
+        if cadence is None:
+            continue
+        wait = _post_sync_wait(post, cadence)
+        if now - attempted >= wait / 2:
+            upcoming.append((attempted + wait, post))
+    upcoming.sort(key=lambda pair: pair[0])
+    return [*due, *(post for _, post in upcoming[:free])]
+
+
+def _post_batch_size(provider) -> int:
+    """How many post ids one metrics request carries; 1 for platforms without a batch endpoint."""
+    return max(1, getattr(provider, "post_metrics_batch_size", 1))
 
 
 def _handle_quota_exhaustion(account, exc, *, key: str, scope: str | None = None, cache) -> None:
@@ -1370,7 +1422,9 @@ def _sync_one_account(account, on_date, now, *, cache, force_today=False, deadli
 
         if blocked(post_scope):
             return 0, 0, 0
-        due = [p for p in _due_posts_for(account, now) if _post_cadence_due(p, now, platform=account.platform)]
+        candidates = _due_posts_for(account, now)
+        due = [p for p in candidates if _post_cadence_due(p, now, platform=account.platform)]
+        due = _fill_post_batch(due, candidates, batch_size=_post_batch_size(provider), now=now)
         return _sync_account_posts(account, provider, access_token, due, on_date, deadline=deadline)
     except QuotaExceededError as exc:
         _handle_quota_exhaustion(account, exc, key=key, scope=post_scope, cache=cache)

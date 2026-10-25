@@ -3,11 +3,14 @@
 import logging
 import re
 from datetime import timedelta
+from functools import partial
 from typing import Any
 
 from background_task import background
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count
+from django.db.models.fields.json import KT
 from django.utils import timezone
 
 from apps.common import quota
@@ -70,6 +73,77 @@ def _queue_health_check(account: SocialAccount) -> None:
         check_social_account_health(str(account.id), remove_existing_tasks=True)
     except Exception as exc:
         logger.error("Could not queue inbox health check for account %s: error_type=%s", account.id, type(exc).__name__)
+
+
+def _stored_reply_counts(account, parent_ids: list[str]) -> dict[str, int]:
+    """How many replies the inbox already holds for each of ``parent_ids``.
+
+    Lets a history walk skip the reply pages of a thread it has already
+    imported in full. Asked per page, for that page's partly embedded threads
+    only, so a capped walk never aggregates the account's whole history.
+    """
+    return dict(
+        InboxMessage.objects.filter(social_account=account, extra__parent_id__in=parent_ids)
+        .annotate(parent=KT("extra__parent_id"))
+        .values("parent")
+        .annotate(n=Count("id"))
+        .values_list("parent", "n")
+    )
+
+
+def _full_reply_walk_due(account) -> bool:
+    """Whether this deep sweep must fetch every reply thread regardless of counts.
+
+    A stored count can match ``totalReplyCount`` by coincidence — one reply
+    deleted upstream, one added — and the deleted row lingers until the
+    compliance refresh removes it, or forever where enforcement is off. The
+    first sweep of each calendar month ignores the counts, so such a reply
+    waits at most about a month instead of indefinitely. Keyed off the last
+    completed sweep, which a cursor-resumed sweep leaves unchanged, so every
+    page of one sweep makes the same choice.
+    """
+    last = account.inbox_last_deep_sweep_at
+    if last is None:
+        return False
+    now = timezone.now()
+    return (last.year, last.month) != (now.year, now.month)
+
+
+def _since_last_full_reply_walk(account):
+    """The ``since`` a full reply walk needs to emit what the skipping sweeps missed.
+
+    The weekly sweep's ``since`` is the previous sweep, so a full walk that kept
+    it would fetch a skipped reply only to drop it as older than the cutoff —
+    after which nothing would ever look for it again. Every reply a skipping
+    sweep could have missed was posted after the last full walk began, and that
+    walk was the first sweep of the month the last sweep ran in: the start of
+    that month bounds them all. Re-emitting messages already stored only
+    refreshes them; ``_upsert_message`` notifies on creation alone.
+    """
+    last = account.inbox_last_deep_sweep_at
+    return last.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+def youtube_message_kwargs(account, *, since, deep: bool = False, skip_stored_replies: bool = True) -> dict:
+    """Keyword arguments for ``YouTubeProvider.get_messages`` that save quota.
+
+    The stored channel id spares the ``channels.list`` lookup on every poll.
+
+    Reply counts go only to a routine deep sweep, the one walk whose misses the
+    monthly full walk recovers. A first import or an explicit backfill has no
+    later walk reaching back that far, and little stored to save on, so it
+    fetches every reply thread. ``skip_stored_replies=False`` is that choice for
+    callers that also sweep deep.
+    """
+    kwargs: dict = {"since": since, "deep": deep}
+    if account.account_platform_id:
+        kwargs["channel_id"] = account.account_platform_id
+    if deep and since is not None and skip_stored_replies:
+        if _full_reply_walk_due(account):
+            kwargs["since"] = min(since, _since_last_full_reply_walk(account))
+        else:
+            kwargs["stored_reply_counts"] = partial(_stored_reply_counts, account)
+    return kwargs
 
 
 def _is_recent(ts):
@@ -429,7 +503,7 @@ class InboxSyncEngine:
         )
         if account.connection_status != SocialAccount.ConnectionStatus.CONNECTED:
             return None
-        message_kwargs = {"since": since, "deep": deep}
+        message_kwargs = youtube_message_kwargs(account, since=since, deep=deep)
         if page_token:
             message_kwargs["page_token"] = page_token
         access_token = account.oauth_access_token

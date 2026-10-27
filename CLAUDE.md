@@ -14,5 +14,5 @@
 - Ядро (`apps/publisher/engine.py`, `providers/`) менять только с тестами; оно защищает от двойной публикации.
 - Новая платформа затрагивает ~16 файлов и 2 миграции (образец: коммит `e4da3a2`, DEV.to): `providers/<x>.py`, `providers/__init__.py`, `PlatformCredential.Platform` + миграции `credentials` и `social_accounts` (три модели), `SocialAccount.PLATFORM_CHAR_LIMITS/PLATFORM_FIELD_CONFIG/platform_icon`, `apps/api/limits.py`, `apps/analytics` (`NO_ANALYTICS_PLATFORMS` + `BACKFILL_DAYS_PER_PLATFORM=0`, если аналитики нет), `apps/common/context_processors.py`, connect-view + URL + шаблон, иконки в двух `_platform_icon.html`, ветка в `_resolve_publish_credentials` (engine.py) для per-account данных, и жёсткий набор в `tests/providers/test_base.py`.
 - Исправления, полезные upstream (баги, тесты), оформлять отдельными небольшими коммитами, чтобы предложить PR-ом.
-- Не переводить строки интерфейса вразнобой до этапа русификации (`docs/ПЛАН.md`, этап 8).
+- Интерфейс остаётся на английском (решение владельца): не переводить строки UI.
 - Не менять `ENCRYPTION_KEY_SALT` и `SECRET_KEY` на инстансе с подключёнными аккаунтами; `.env` не коммитить и не вставлять в чат.

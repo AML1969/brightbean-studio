@@ -1,4 +1,4 @@
-.PHONY: help setup dev server worker tailwind test lint format typecheck migrate migrations docker-up docker-down docker-build
+.PHONY: help setup dev server worker tailwind test lint format typecheck check migrate migrations docker-up docker-down docker-build
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
@@ -57,6 +57,12 @@ format: ## Auto-fix lint and formatting issues
 
 typecheck: ## Run mypy type checker
 	mypy apps/ config/ providers/ tests/ --ignore-missing-imports
+
+check: ## Run the same static checks as CI (lint, format, types, migrations)
+	ruff check .
+	ruff format --check .
+	mypy apps/ config/ providers/ tests/ --ignore-missing-imports
+	python manage.py makemigrations --check --dry-run
 
 # Docker
 

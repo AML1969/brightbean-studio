@@ -5,14 +5,16 @@ services:
     env_file:
       - .env
     environment:
+      # DATABASE_URL comes from .env, the same value app and worker use.
       - DJANGO_SETTINGS_MODULE=config.settings.production
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/brightbean
     depends_on:
       postgres:
         condition: service_healthy
 
   app:
-    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --threads 2
+    # Reachable only from Caddy on the compose network: no published port.
+    # Workers x threads is a Postgres connection budget, see config/settings/base.py.
+    command: gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 2 --threads 4
     volumes:
       - media_data:/app/media
     environment:
@@ -20,6 +22,8 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   worker:
@@ -30,9 +34,20 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_started
     restart: unless-stopped
 
   postgres:
+    restart: unless-stopped
+
+  redis:
+    # Shared cache for rate limits, the auth brute-force counter and API-key
+    # revocation. Without REDIS_URL each gunicorn worker keeps its own counters.
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    volumes:
+      - redis_data:/data
     restart: unless-stopped
 
   caddy:
@@ -47,6 +62,9 @@ services:
       # Read-only so Caddy can serve uploads but never write into MEDIA_ROOT.
       - media_data:/app/media:ro
     environment:
+      # Public hostname Caddy obtains a certificate for. Set APP_DOMAIN in .env;
+      # the Caddyfile falls back to localhost when it is empty.
+      - APP_DOMAIN=${APP_DOMAIN:-localhost}
       # Set CADDY_MEDIA_ROOT=/var/empty in .env when STORAGE_BACKEND=s3: the
       # named volume outlives the switch, and Caddy cannot read Django's
       # SERVE_MEDIA. See the Caddyfile.
@@ -58,3 +76,4 @@ services:
 volumes:
   caddy_data:
   caddy_config:
+  redis_data:

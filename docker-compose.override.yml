@@ -4,22 +4,30 @@ services:
       - .:/app
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/brightbean
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/brightbean
 
   app:
     command: python manage.py runserver 0.0.0.0:8000
+    ports:
+      - "8000:8000"
     volumes:
       - .:/app
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/brightbean
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/brightbean
 
   worker:
     volumes:
       - .:/app
     environment:
       - DJANGO_SETTINGS_MODULE=config.settings.development
-      - DATABASE_URL=postgres://postgres:postgres@postgres:5432/brightbean
+      - DATABASE_URL=postgres://postgres:${POSTGRES_PASSWORD:-postgres}@postgres:5432/brightbean
+
+  postgres:
+    # Dev convenience only: reachable from the host for psql/IDE, never from
+    # the network. Production (docker-compose.prod.yml) publishes no DB port.
+    ports:
+      - "127.0.0.1:5432:5432"
 
   tailwind:
     image: node:20-slim

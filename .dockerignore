@@ -1,0 +1,28 @@
+# Секреты и локальное окружение — никогда не должны попадать в образ
+.env
+.env.*
+!.env.example
+# Виртуальные окружения и кэши
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+# Git и редакторы
+.git
+.github
+.claude
+.vscode
+.idea
+# Локальные данные и сборки
+media
+test_media
+db.sqlite3
+staticfiles
+theme/static_src/node_modules
+theme/static/css/dist
+# Артефакты ревью и спецификации не нужны в рантайме
+output
+development_specs

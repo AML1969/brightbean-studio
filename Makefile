@@ -26,7 +26,7 @@ server: ## Start Django dev server
 	python manage.py runserver
 
 worker: ## Start background task worker
-	python manage.py process_tasks
+	python manage.py run_studio_worker
 
 tailwind: ## Start Tailwind CSS watcher
 	cd theme/static_src && npm run start
